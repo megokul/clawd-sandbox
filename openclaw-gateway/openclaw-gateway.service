@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenClaw Gateway Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/openclaw-gateway
+ExecStart=/home/ubuntu/openclaw-gateway/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+# Environment — set the shared auth token here.
+# Or use EnvironmentFile for secrets:
+#   EnvironmentFile=/home/ubuntu/openclaw-gateway/.env
+Environment=OPENCLAW_AUTH_TOKEN=REPLACE_ME_WITH_REAL_TOKEN
+Environment=OPENCLAW_LOG_LEVEL=INFO
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/openclaw-gateway/certs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+{"ts": "2026-02-13T15:08:53.087231+00:00", "epoch": 1770995333.0872316, "request_id": "e44008d1-7797-4bae-893b-eaaa30155233", "action": "git_status", "tier": "AUTO", "params": {"working_dir": "C:\\Users\\gokul\\projects"}, "outcome": "INTERNAL_ERROR", "detail": "[WinError 267] The directory name is invalid", "duration_ms": 15.0}

@@ -1,0 +1,5 @@
+# OpenClaw Local Execution Agent — Python dependencies
+#
+# Install:  pip install -r requirements.txt
+
+websockets>=14.0,<15.0
