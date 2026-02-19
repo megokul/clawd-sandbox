@@ -48,6 +48,18 @@ def _parse_roots(raw: str, remote_os: str) -> list[str]:
     return ["/home", "/tmp"]
 
 
+def _parse_provider_priority(raw: str) -> list[str]:
+    allowed = {"gemini", "deepseek", "groq", "openrouter", "openai", "anthropic"}
+    parts = [p.strip().lower() for p in raw.replace(";", ",").split(",") if p.strip()]
+    ordered: list[str] = []
+    for part in parts:
+        if part in allowed and part not in ordered:
+            ordered.append(part)
+    if ordered:
+        return ordered
+    return ["gemini", "deepseek", "groq", "openrouter"]
+
+
 def _norm_remote_path(path: str, remote_os: str) -> str:
     if remote_os == "windows":
         return str(PureWindowsPath(path))
@@ -166,6 +178,18 @@ class SSHTunnelExecutor:
         self._health_cache_seconds = _env_int("OPENCLAW_SSH_HEALTH_CACHE_SECONDS", 15)
         self._last_health_at = 0.0
         self._last_health: tuple[bool, str] = (False, "SSH health not checked yet")
+        self._cline_auto_switch = _env_bool("OPENCLAW_CLINE_AUTO_SWITCH", True)
+        self._cline_provider_priority = _parse_provider_priority(
+            os.environ.get("OPENCLAW_CLINE_PROVIDER_PRIORITY", ""),
+        )
+        self._cline_provider_base_urls = {
+            "gemini": os.environ.get("OPENCLAW_CLINE_GEMINI_BASE_URL", "").strip(),
+            "deepseek": os.environ.get("OPENCLAW_CLINE_DEEPSEEK_BASE_URL", "").strip(),
+            "groq": os.environ.get("OPENCLAW_CLINE_GROQ_BASE_URL", "").strip(),
+            "openrouter": os.environ.get("OPENCLAW_CLINE_OPENROUTER_BASE_URL", "").strip(),
+            "openai": os.environ.get("OPENCLAW_CLINE_OPENAI_BASE_URL", "").strip(),
+            "anthropic": os.environ.get("OPENCLAW_CLINE_ANTHROPIC_BASE_URL", "").strip(),
+        }
 
     def is_configured(self) -> bool:
         return self.enabled and bool(self.username and self.host)
@@ -473,13 +497,14 @@ class SSHTunnelExecutor:
                         "stderr": "Cline CLI is not installed or not on PATH.",
                     }
 
-            args = [binary, "auth", "-p", provider, "-k", api_key]
-            if model:
-                args.extend(["-m", model])
-            if base_url:
-                args.extend(["-b", base_url])
-
-            configured = self._run_command(client, args, cwd=None, timeout=120)
+            configured = self._configure_cline_provider(
+                client=client,
+                binary=binary,
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+            )
             if configured["returncode"] != 0:
                 return configured
 
@@ -522,7 +547,23 @@ class SSHTunnelExecutor:
                         ),
                     }
             args = [binary, *self._coding_prefix[agent], prompt]
-            return self._run_command(client, args, cwd=cwd, timeout=timeout)
+            initial = self._run_command(client, args, cwd=cwd, timeout=timeout)
+            if agent != "cline":
+                return initial
+            if initial["returncode"] == 0:
+                return initial
+            if not self._cline_auto_switch:
+                return initial
+            if not self._is_retryable_cline_failure(initial):
+                return initial
+            return self._run_cline_with_auto_switch(
+                client=client,
+                binary=binary,
+                prompt=prompt,
+                cwd=cwd if isinstance(cwd, str) else None,
+                timeout=timeout,
+                initial_result=initial,
+            )
 
         if action == "docker_build":
             cwd = self._require_str(params, "working_dir")
@@ -562,14 +603,118 @@ class SSHTunnelExecutor:
     @staticmethod
     def _default_model_for_provider(provider: str) -> str:
         defaults = {
-            "gemini": bot_cfg.GEMINI_MODEL or "gemini-2.0-flash",
-            "deepseek": "deepseek-chat",
-            "groq": "llama-3.3-70b-versatile",
-            "openrouter": bot_cfg.OPENROUTER_MODEL or "qwen/qwen3-next-80b-a3b-instruct:free",
-            "openai": "gpt-4o-mini",
-            "anthropic": "claude-sonnet-4-5",
+            "gemini": os.environ.get("OPENCLAW_CLINE_GEMINI_MODEL", bot_cfg.GEMINI_MODEL or "gemini-2.0-flash"),
+            "deepseek": os.environ.get("OPENCLAW_CLINE_DEEPSEEK_MODEL", "deepseek-chat"),
+            "groq": os.environ.get("OPENCLAW_CLINE_GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "openrouter": os.environ.get(
+                "OPENCLAW_CLINE_OPENROUTER_MODEL",
+                bot_cfg.OPENROUTER_MODEL or "qwen/qwen3-next-80b-a3b-instruct:free",
+            ),
+            "openai": os.environ.get("OPENCLAW_CLINE_OPENAI_MODEL", "gpt-4o-mini"),
+            "anthropic": os.environ.get("OPENCLAW_CLINE_ANTHROPIC_MODEL", "claude-sonnet-4-5"),
         }
         return str(defaults.get(provider, "") or "").strip()
+
+    def _configure_cline_provider(
+        self,
+        *,
+        client: paramiko.SSHClient,
+        binary: str,
+        provider: str,
+        api_key: str,
+        model: str,
+        base_url: str,
+    ) -> dict[str, Any]:
+        args = [binary, "auth", "-p", provider, "-k", api_key]
+        if model:
+            args.extend(["-m", model])
+        if base_url:
+            args.extend(["-b", base_url])
+        return self._run_command(client, args, cwd=None, timeout=120)
+
+    @staticmethod
+    def _is_retryable_cline_failure(result: dict[str, Any]) -> bool:
+        text = (
+            f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+        ).lower()
+        markers = (
+            "not authenticated",
+            "api request failed",
+            "provider returned error",
+            "rate limit",
+            "rate_limit_exceeded",
+            "resource_exhausted",
+            "quota",
+            "quota exceeded",
+            "insufficient_quota",
+            "status\":402",
+            "status\":429",
+            "status':402",
+            "status':429",
+            "spend limit",
+            "billing",
+            "too many requests",
+        )
+        return any(marker in text for marker in markers)
+
+    def _run_cline_with_auto_switch(
+        self,
+        *,
+        client: paramiko.SSHClient,
+        binary: str,
+        prompt: str,
+        cwd: str | None,
+        timeout: int,
+        initial_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        attempted: list[str] = []
+        last = dict(initial_result)
+        run_args = [binary, *self._coding_prefix["cline"], prompt]
+
+        for provider in self._cline_provider_priority:
+            api_key = self._default_api_key_for_provider(provider)
+            if not api_key:
+                continue
+            model = self._default_model_for_provider(provider)
+            base_url = self._cline_provider_base_urls.get(provider, "")
+            attempted.append(provider)
+
+            configured = self._configure_cline_provider(
+                client=client,
+                binary=binary,
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+            )
+            if configured.get("returncode", 1) != 0:
+                last = configured
+                continue
+
+            run = self._run_command(client, run_args, cwd=cwd, timeout=timeout)
+            notice = (
+                f"Notice: auto-switched Cline provider to {provider}"
+                + (f" (model: {model})." if model else ".")
+            )
+            run["stdout"] = (f"{notice}\n{run.get('stdout', '').strip()}").strip()
+            if run.get("returncode", 1) == 0:
+                run["stderr"] = (run.get("stderr") or "").strip()
+                return run
+            last = run
+            if not self._is_retryable_cline_failure(run):
+                return run
+
+        if attempted:
+            suffix = f"Auto-switch attempted providers: {', '.join(attempted)}."
+            err = (last.get("stderr") or "").strip()
+            out = (last.get("stdout") or "").strip()
+            if err:
+                last["stderr"] = f"{err}\n{suffix}"
+            elif out:
+                last["stderr"] = suffix
+            else:
+                last["stderr"] = f"Cline failed and {suffix}"
+        return last
 
     def _resolve_windows_binary(self, client: paramiko.SSHClient, binary: str) -> tuple[str, bool]:
         b = (binary or "").strip()
