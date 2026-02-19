@@ -39,12 +39,13 @@ DEFAULT_WORKING_DIR: str = os.environ.get(
 # AI Provider API Keys
 # ---------------------------------------------------------------------------
 GOOGLE_AI_API_KEY: str = os.environ.get("GOOGLE_AI_API_KEY", "")
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL: str = os.environ.get("OPENROUTER_MODEL", "openrouter/auto")
 OPENROUTER_FALLBACK_MODELS: str = os.environ.get(
     "OPENROUTER_FALLBACK_MODELS",
-    "google/gemini-2.0-flash-exp:free,meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemini-2.0-flash,meta-llama/llama-3.3-70b-instruct:free",
 )
 DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")

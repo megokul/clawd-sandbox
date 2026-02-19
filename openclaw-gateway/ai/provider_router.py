@@ -235,8 +235,9 @@ def build_providers(config: dict[str, str]) -> list[BaseProvider]:
 
     # 1. Gemini — secondary (biggest free cloud tier)
     if config.get("GOOGLE_AI_API_KEY"):
-        providers.append(GeminiProvider(config["GOOGLE_AI_API_KEY"]))
-        logger.info("Registered provider: Gemini Flash")
+        gemini_model = config.get("GEMINI_MODEL", "gemini-2.0-flash")
+        providers.append(GeminiProvider(config["GOOGLE_AI_API_KEY"], model=gemini_model))
+        logger.info("Registered provider: Gemini Flash (model=%s)", gemini_model)
 
     # 2. Groq — fast secondary
     if config.get("GROQ_API_KEY"):
@@ -245,17 +246,39 @@ def build_providers(config: dict[str, str]) -> list[BaseProvider]:
 
     # 3. OpenRouter — free models
     if config.get("OPENROUTER_API_KEY"):
-        openrouter_model = config.get("OPENROUTER_MODEL", "openrouter/auto")
+        deprecated_openrouter_models = {
+            "google/gemini-2.0-flash-exp:free",
+        }
+        openrouter_model = (config.get("OPENROUTER_MODEL") or "").strip()
+        if not openrouter_model:
+            openrouter_model = "openrouter/auto"
+        elif openrouter_model in deprecated_openrouter_models:
+            logger.warning(
+                "OPENROUTER_MODEL '%s' is deprecated; falling back to 'openrouter/auto'",
+                openrouter_model,
+            )
+            openrouter_model = "openrouter/auto"
+
         raw_fallback_models = config.get("OPENROUTER_FALLBACK_MODELS", "")
         fallback_models = [
             m.strip()
             for m in raw_fallback_models.replace(";", ",").split(",")
             if m.strip()
         ]
+
+        # Normalize deprecated fallback entries.
+        normalized: list[str] = []
+        for model in fallback_models:
+            if model in deprecated_openrouter_models:
+                model = "google/gemini-2.0-flash"
+            if model and model not in normalized:
+                normalized.append(model)
+        fallback_models = normalized
+
         if not fallback_models:
             # Keep a short compatibility list for older/deprecated defaults.
             fallback_models = [
-                "google/gemini-2.0-flash-exp:free",
+                "google/gemini-2.0-flash",
                 "meta-llama/llama-3.3-70b-instruct:free",
             ]
         providers.append(OpenAICompatProvider(

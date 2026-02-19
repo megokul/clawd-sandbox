@@ -26,6 +26,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
       GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
@@ -86,6 +87,7 @@ jobs:
             printf 'TELEGRAM_BOT_TOKEN=%s\n' "${TELEGRAM_BOT_TOKEN}"
             printf 'TELEGRAM_ALLOWED_USER_ID=%s\n' "${TELEGRAM_ALLOWED_USER_ID}"
             printf 'GOOGLE_AI_API_KEY=%s\n' "${GOOGLE_AI_API_KEY}"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-2.0-flash}"
             printf 'GROQ_API_KEY=%s\n' "${GROQ_API_KEY}"
             printf 'OPENROUTER_API_KEY=%s\n' "${OPENROUTER_API_KEY}"
             printf 'OPENROUTER_MODEL=%s\n' "${OPENROUTER_MODEL}"
