@@ -1,0 +1,71 @@
+name: Deploy SKYNET on EC2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: skynet-ec2-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy on self-hosted runner
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      OPENCLAW_GATEWAY_URL: ${{ secrets.OPENCLAW_GATEWAY_URL }}
+      OPENCLAW_GATEWAY_URLS: ${{ secrets.OPENCLAW_GATEWAY_URLS }}
+      SKYNET_API_KEY: ${{ secrets.SKYNET_API_KEY }}
+      CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          : "${OPENCLAW_GATEWAY_URL:?Missing OPENCLAW_GATEWAY_URL secret}"
+          : "${SKYNET_API_KEY:?Missing SKYNET_API_KEY secret}"
+
+      - name: Build deployment env file
+        shell: bash
+        run: |
+          {
+            printf 'OPENCLAW_GATEWAY_URL=%s\n' "${OPENCLAW_GATEWAY_URL}"
+            printf 'OPENCLAW_GATEWAY_URLS=%s\n' "${OPENCLAW_GATEWAY_URLS}"
+            printf 'SKYNET_API_KEY=%s\n' "${SKYNET_API_KEY}"
+            printf 'CORS_ORIGINS=%s\n' "${CORS_ORIGINS:-*}"
+          } > .env.ci
+          chmod 600 .env.ci
+
+      - name: Deploy SKYNET API only (leave OpenClaw containers untouched)
+        shell: bash
+        run: |
+          docker compose --env-file .env.ci -f docker-compose.skynet-only.yml \
+            up -d --build --no-deps skynet-api
+
+      - name: Verify deployment
+        shell: bash
+        run: |
+          docker compose --env-file .env.ci -f docker-compose.skynet-only.yml ps
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:8000/v1/health > /dev/null; then
+              echo "Health check passed"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Health check failed"
+          docker compose --env-file .env.ci -f docker-compose.skynet-only.yml \
+            logs --tail=100 skynet-api
+          exit 1
+
+      - name: Cleanup env file
+        if: always()
+        shell: bash
+        run: rm -f .env.ci

@@ -23,8 +23,17 @@ ALLOWED_USER_ID: int = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "715268307
 # Gateway HTTP API (runs on the same machine).
 GATEWAY_API_URL: str = "http://127.0.0.1:8766"
 
-# Default working directory on the laptop.
-DEFAULT_WORKING_DIR: str = r"E:\MyProjects\clawd-sandbox"
+# Default working directory for worker actions.
+# Can be overridden with SKYNET_DEFAULT_WORKING_DIR / OPENCLAW_DEFAULT_WORKING_DIR.
+if os.name == "nt":
+    _default_working_dir = r"E:\MyProjects\clawd-sandbox"
+else:
+    _default_working_dir = "/home/ubuntu/skynet"
+
+DEFAULT_WORKING_DIR: str = os.environ.get(
+    "SKYNET_DEFAULT_WORKING_DIR",
+    os.environ.get("OPENCLAW_DEFAULT_WORKING_DIR", _default_working_dir),
+)
 
 # ---------------------------------------------------------------------------
 # AI Provider API Keys
@@ -74,9 +83,7 @@ PROJECT_BASE_DIR: str = os.environ.get(
 # ---------------------------------------------------------------------------
 # S3 (AWS free tier artifact storage)
 # ---------------------------------------------------------------------------
-S3_BUCKET: str = os.environ.get(
-    "SKYNET_S3_BUCKET", os.environ.get("OPENCLAW_S3_BUCKET", "openclaw-artifacts"),
-)
+S3_BUCKET: str = os.environ.get("SKYNET_S3_BUCKET", "openclaw-artifacts")
 S3_PREFIX: str = os.environ.get(
     "SKYNET_S3_PREFIX", os.environ.get("OPENCLAW_S3_PREFIX", "openclaw/"),
 )

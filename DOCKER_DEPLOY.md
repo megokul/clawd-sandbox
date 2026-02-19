@@ -43,6 +43,41 @@ docker compose -f docker-compose.skynet-only.yml build
 docker compose -f docker-compose.skynet-only.yml up -d
 ```
 
+## Mode C: GitHub Actions -> EC2 (Secrets-Driven)
+
+Workflow file: `.github/workflows/deploy-ec2-skynet.yml`
+
+Required repository secrets:
+- `EC2_HOST`
+- `EC2_USER`
+- `EC2_SSH_KEY` (private key content)
+- `OPENCLAW_GATEWAY_URL`
+- `SKYNET_API_KEY`
+
+Optional repository secrets:
+- `EC2_PORT` (default `22`)
+- `EC2_SKYNET_DIR` (default `/home/<EC2_USER>/skynet`)
+- `CORS_ORIGINS`
+- `GOOGLE_AI_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ALLOWED_USER_ID`
+- `SKYNET_AUTH_TOKEN`
+- `OPENCLAW_HTTP_HOST`
+- `OPENCLAW_HTTP_PORT`
+- `SKYNET_S3_BUCKET`
+- `AWS_REGION` (default `us-east-1`)
+- `AWS_DEFAULT_REGION` (default `us-east-1`)
+- `DISABLE_TELEGRAM_BOT`
+- `OPENCLAW_LOG_LEVEL`
+
+How it deploys:
+1. Clones/pulls this repo on EC2 at `/home/<EC2_USER>/skynet` (or `EC2_SKYNET_DIR`)
+2. Writes `/home/<EC2_USER>/skynet/.env` from GitHub secrets
+3. Runs:
+```bash
+docker compose -f docker-compose.skynet-only.yml up -d --build
+```
+
 ## Verify
 
 ```bash

@@ -105,10 +105,31 @@ BLOCKED_ACTIONS: set[str] = {
 # ---------------------------------------------------------------------------
 # Path restrictions
 # ---------------------------------------------------------------------------
-ALLOWED_ROOTS: list[str] = [
-    r"E:\MyProjects",
-    r"E:\OpenClaw\projects",
-]
+def _parse_allowed_roots() -> list[str]:
+    """
+    Resolve path-jail roots from environment or platform defaults.
+
+    Environment:
+      SKYNET_ALLOWED_ROOTS / OPENCLAW_ALLOWED_ROOTS
+      Delimiters: ';' or ',' (portable across Windows/Linux).
+    """
+    raw = os.environ.get("SKYNET_ALLOWED_ROOTS") or os.environ.get("OPENCLAW_ALLOWED_ROOTS")
+    if raw:
+        roots = [p.strip() for p in raw.replace(",", ";").split(";") if p.strip()]
+        if roots:
+            return roots
+
+    if os.name == "nt":
+        return [
+            r"E:\MyProjects",
+            r"E:\OpenClaw\projects",
+        ]
+
+    # Linux default for EC2-hosted workers.
+    return ["/home/ubuntu", "/tmp"]
+
+
+ALLOWED_ROOTS: list[str] = _parse_allowed_roots()
 
 
 # ---------------------------------------------------------------------------

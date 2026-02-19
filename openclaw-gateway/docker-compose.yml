@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   gateway:
     build: .
@@ -15,7 +13,7 @@ services:
       # Required
       - OPENCLAW_AUTH_TOKEN
       - TELEGRAM_BOT_TOKEN
-      # AI providers (optional — set whichever you have)
+      # AI providers (optional - set whichever you have)
       - GOOGLE_AI_API_KEY
       - GROQ_API_KEY
       - OPENROUTER_API_KEY
@@ -31,7 +29,8 @@ services:
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
-      - OPENCLAW_S3_BUCKET
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - SKYNET_S3_BUCKET
       # TLS (paths inside container)
       - OPENCLAW_TLS_CERT=/app/certs/cert.pem
       - OPENCLAW_TLS_KEY=/app/certs/key.pem

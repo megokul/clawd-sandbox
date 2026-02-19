@@ -71,11 +71,15 @@ async def _connect_and_listen() -> None:
 
     logger.info("Connecting to %s …", config.GATEWAY_URL)
 
-    # Accept self-signed certs from the gateway.  In production, replace
-    # with a proper CA-signed cert and remove this override.
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+    # Only configure TLS for wss:// endpoints. Passing ssl=... to ws://
+    # raises ValueError in websockets and breaks reconnect loops.
+    ssl_ctx = None
+    if config.GATEWAY_URL.lower().startswith("wss://"):
+        # Accept self-signed certs from the gateway. In production, replace
+        # with a proper CA-signed cert and remove this override.
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
 
     async with websockets.connect(
         config.GATEWAY_URL,
