@@ -49,6 +49,15 @@ _approval_counter: int = 0
 # Reference to the Telegram app for sending proactive messages.
 _bot_app: Application | None = None
 
+# Short rolling chat history for natural Telegram conversation.
+_chat_history: list[dict[str, str]] = []
+_CHAT_HISTORY_MAX: int = 12
+_CHAT_SYSTEM_PROMPT = (
+    "You are SKYNET's Telegram assistant. Reply naturally in plain language. "
+    "Be concise, helpful, and ask clarifying questions when needed. "
+    "Do not output JSON unless the user explicitly asks for it."
+)
+
 
 def set_dependencies(project_manager, provider_router, heartbeat=None, sentinel=None):
     """Called by main.py to inject dependencies."""
@@ -152,6 +161,71 @@ async def _send_to_user(text: str, parse_mode: str = "HTML") -> None:
             )
         except Exception as exc:
             logger.warning("Failed to send proactive message: %s", exc)
+
+
+def _trim_chat_history() -> None:
+    """Keep only the most recent conversation turns in memory."""
+    global _chat_history
+    max_items = _CHAT_HISTORY_MAX * 2
+    if len(_chat_history) > max_items:
+        _chat_history = _chat_history[-max_items:]
+
+
+async def _reply_naturally(update: Update, text: str) -> None:
+    """Reply to plain text as a normal AI conversation."""
+    if not _provider_router:
+        await update.message.reply_text("AI providers not configured.")
+        return
+
+    history = _chat_history[-(_CHAT_HISTORY_MAX * 2):]
+    messages = [*history, {"role": "user", "content": text}]
+    try:
+        response = await _provider_router.chat(
+            messages,
+            system=_CHAT_SYSTEM_PROMPT,
+            max_tokens=600,
+            task_type="general",
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"AI unavailable: {exc}")
+        return
+
+    reply = (response.text or "").strip()
+    if not reply:
+        reply = "I could not generate a reply right now."
+    if len(reply) > 3800:
+        reply = reply[:3800] + "\n\n... (truncated)"
+
+    _chat_history.append({"role": "user", "content": text})
+    _chat_history.append({"role": "assistant", "content": reply})
+    _trim_chat_history()
+
+    await update.message.reply_text(reply)
+
+
+async def _capture_idea(update: Update, text: str) -> None:
+    """Save one idea into the active ideation project."""
+    if not _project_manager:
+        await update.message.reply_text("Project manager not initialized.")
+        return
+
+    project = await _project_manager.get_ideation_project()
+    if not project:
+        await update.message.reply_text(
+            "No project in ideation mode.\n"
+            "Use /newproject <name> first, then send ideas or use /idea.",
+        )
+        return
+
+    try:
+        count = await _project_manager.add_idea(project["id"], text)
+        await update.message.reply_text(
+            f"Added idea #{count} to <b>{html.escape(project['display_name'])}</b>.\n"
+            f"Send more or use /plan to generate the plan.",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
 
 
 # ------------------------------------------------------------------
@@ -310,6 +384,15 @@ async def cmd_newproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_idea(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /idea <text>")
+        return
+    await _capture_idea(update, " ".join(context.args).strip())
 
 
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -512,7 +595,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>SKYNET // CHATHAN — AI Project Factory</b>\n\n"
         "<b>Project Management:</b>\n"
         "  /newproject &lt;name&gt; — start a new project\n"
-        "  (send text) — add ideas to current project\n"
+        "  (send text) — natural chat with SKYNET\n"
+        "  /idea &lt;text&gt; — add idea to current project\n"
         "  /plan [name] — generate project plan\n"
         "  /projects — list all projects\n"
         "  /status &lt;name&gt; — project status\n"
@@ -764,28 +848,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _authorised(update):
         return
     text = update.message.text.strip()
-    if not text or not _project_manager:
+    if not text:
         return
 
-    # Try to add as an idea to the current ideation project.
-    project = await _project_manager.get_ideation_project()
-    if project:
-        try:
-            count = await _project_manager.add_idea(project["id"], text)
-            await update.message.reply_text(
-                f"Added idea #{count} to <b>{html.escape(project['display_name'])}</b>.\n"
-                f"Send more or use /plan to generate the plan.",
-                parse_mode="HTML",
-            )
-        except Exception as exc:
-            await update.message.reply_text(f"Error: {exc}")
-    else:
-        await update.message.reply_text(
-            "No project in ideation mode.\n"
-            "Use /newproject &lt;name&gt; to start a new project,\n"
-            "or /start to see all commands.",
-            parse_mode="HTML",
-        )
+    # Optional explicit idea prefix while in chat mode.
+    if text.lower().startswith("idea:"):
+        idea_text = text[5:].strip()
+        if not idea_text:
+            await update.message.reply_text("Usage: idea: <text>")
+            return
+        await _capture_idea(update, idea_text)
+        return
+
+    if cfg.TELEGRAM_TEXT_MODE == "idea":
+        await _capture_idea(update, text)
+        return
+
+    await _reply_naturally(update, text)
 
 
 # ------------------------------------------------------------------
@@ -802,6 +881,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("newproject", cmd_newproject))
+    app.add_handler(CommandHandler("idea", cmd_idea))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("status", cmd_project_status))

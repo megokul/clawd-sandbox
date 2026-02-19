@@ -23,6 +23,11 @@ ALLOWED_USER_ID: int = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "715268307
 # Gateway HTTP API (runs on the same machine).
 GATEWAY_API_URL: str = "http://127.0.0.1:8766"
 
+# How plain text messages are handled in Telegram.
+# - "chat": converse naturally with AI (default)
+# - "idea": treat plain text as project ideation input
+TELEGRAM_TEXT_MODE: str = os.environ.get("TELEGRAM_TEXT_MODE", "chat").strip().lower()
+
 # Default working directory for worker actions.
 # Can be overridden with SKYNET_DEFAULT_WORKING_DIR / OPENCLAW_DEFAULT_WORKING_DIR.
 if os.name == "nt":
