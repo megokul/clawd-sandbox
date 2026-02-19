@@ -88,7 +88,12 @@ class ProjectManager:
             f"Project '{name}' created at {local_path}",
             detail=bootstrap_summary,
         )
-        return await store.get_project(self.db, project["id"])
+        out = await store.get_project(self.db, project["id"])
+        if out is None:
+            raise ValueError("Project was created but could not be loaded.")
+        out["bootstrap_summary"] = bootstrap_summary
+        out["bootstrap_ok"] = "failed" not in bootstrap_summary.lower()
+        return out
 
     async def add_idea(self, project_id: str, text: str) -> int:
         """Add an idea message to a project in ideation phase."""

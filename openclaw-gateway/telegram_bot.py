@@ -12,10 +12,12 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import html
 import re
+import uuid
 
 import aiohttp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -29,6 +31,7 @@ from telegram.ext import (
 )
 
 import bot_config as cfg
+from ai.providers.base import ToolCall
 
 logger = logging.getLogger("skynet.telegram")
 
@@ -212,6 +215,56 @@ def _build_assistant_content(response) -> object:
     return parts if parts else response.text
 
 
+def _extract_textual_tool_call(text: str) -> ToolCall | None:
+    """
+    Recover a tool call when a model emits it as plain text instead of structured tool_calls.
+    Supports payloads like:
+      {'type': 'tool_use', 'id': '...', 'name': 'git_init', 'input': {...}}
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    candidates: list[str] = [raw]
+    # Strip fenced block if present.
+    if raw.startswith("```") and raw.endswith("```"):
+        body = raw.strip("`").strip()
+        body = re.sub(r"^(json|python)\s*", "", body, flags=re.IGNORECASE)
+        candidates.append(body.strip())
+
+    # Try first object-like block from freeform text.
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+
+    for cand in candidates:
+        obj = None
+        try:
+            obj = ast.literal_eval(cand)
+        except Exception:
+            try:
+                obj = json.loads(cand)
+            except Exception:
+                obj = None
+        if not isinstance(obj, dict):
+            continue
+
+        tool_type = str(obj.get("type", "")).strip().lower()
+        name = obj.get("name")
+        tool_input = obj.get("input")
+        if tool_type not in {"tool_use", "function_call", ""}:
+            continue
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(tool_input, dict):
+            continue
+
+        tool_id = str(obj.get("id") or f"text_tool_{uuid.uuid4().hex[:10]}")
+        return ToolCall(id=tool_id, name=name.strip(), input=tool_input)
+
+    return None
+
+
 async def _maybe_notify_model_switch(update: Update, response) -> None:
     """Send a compact notice when provider/model changes."""
     global _last_model_signature
@@ -306,7 +359,13 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
             await _maybe_notify_model_switch(update, response)
             messages.append({"role": "assistant", "content": _build_assistant_content(response)})
 
-            if not response.tool_calls:
+            tool_calls = list(response.tool_calls or [])
+            if not tool_calls:
+                recovered = _extract_textual_tool_call(response.text or "")
+                if recovered:
+                    tool_calls = [recovered]
+
+            if not tool_calls:
                 final_text = (response.text or "").strip()
                 break
 
@@ -320,7 +379,7 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
                 request_approval=request_worker_approval,
             )
             tool_results = []
-            for tc in response.tool_calls:
+            for tc in tool_calls:
                 skill = _skill_registry.get_skill_for_tool(tc.name)
                 if skill is None:
                     result = f"Unknown tool: {tc.name}"
@@ -485,6 +544,19 @@ def _norm_project(text: str) -> str:
 
 def _project_display(project: dict) -> str:
     return str(project.get("display_name") or project.get("name") or "project")
+
+
+def _project_bootstrap_note(project: dict) -> str:
+    summary = str(project.get("bootstrap_summary") or "").strip()
+    if not summary:
+        return ""
+    lowered = summary.lower()
+    if "failed" in lowered:
+        return (
+            f"Bootstrap issue: {summary}\n"
+            "Project record was created, but workspace setup did not fully complete."
+        )
+    return f"Bootstrap: {summary}"
 
 
 def _extract_nl_intent(text: str) -> dict[str, str]:
@@ -716,9 +788,13 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
                 f"\nGitHub: {project.get('github_repo')}"
                 if project.get("github_repo") else ""
             )
+            bootstrap_note = _project_bootstrap_note(project)
+            if bootstrap_note:
+                bootstrap_note = "\n" + bootstrap_note
             await update.message.reply_text(
                 (
                     f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}\n"
+                    f"{bootstrap_note}\n"
                     "Share details naturally. Once details are enough, I can auto-plan and execute."
                 )
             )
@@ -1047,10 +1123,15 @@ async def cmd_newproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"\n<b>GitHub:</b> {html.escape(project.get('github_repo', ''))}"
             if project.get("github_repo") else ""
         )
+        bootstrap_note_raw = _project_bootstrap_note(project)
+        bootstrap_line = (
+            f"\n\n<b>Bootstrap:</b>\n{html.escape(bootstrap_note_raw)}"
+            if bootstrap_note_raw else ""
+        )
         await update.message.reply_text(
             f"<b>Project created:</b> {html.escape(project['display_name'])}\n\n"
             f"<b>Path:</b> <code>{html.escape(project.get('local_path', ''))}</code>"
-            f"{repo_line}\n\n"
+            f"{repo_line}{bootstrap_line}\n\n"
             f"Send ideas as text messages.\n"
             f"I can auto-plan/start once enough details are captured "
             f"(threshold: {cfg.AUTO_PLAN_MIN_IDEAS} ideas).",
