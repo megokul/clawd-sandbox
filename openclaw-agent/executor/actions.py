@@ -21,6 +21,7 @@ import os
 import re
 import logging
 import shutil
+from html import unescape
 from urllib import parse, request
 from typing import Any
 
@@ -285,27 +286,66 @@ def _ddg_web_search_sync(query: str, num_results: int) -> str:
         page = resp.read().decode("utf-8", errors="replace")
 
     results: list[str] = []
-    links = re.findall(
-        r'class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-        page,
-        re.DOTALL,
+
+    # DDG Lite result links vary in quote style/order:
+    #   <a ... class='result-link' href='...'> OR href before class
+    link_pattern = re.compile(
+        r"<a(?=[^>]*class=['\"]result-link['\"])(?=[^>]*href=['\"]([^'\"]+)['\"])[^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
     )
-    for link, title in links[:num_results]:
-        title_text = re.sub(r"<[^>]+>", "", title).strip()
+    for match in link_pattern.finditer(page):
+        raw_link = (match.group(1) or "").strip()
+        title_html = match.group(2) or ""
+        if not raw_link:
+            continue
+        link = _normalize_ddg_result_url(raw_link)
+        if not link:
+            continue
+        title_text = unescape(re.sub(r"<[^>]+>", "", title_html)).strip()
+        if not title_text:
+            title_text = "No title"
         results.append(f"- {title_text}\n  URL: {link}")
+        if len(results) >= num_results:
+            break
 
     if results:
         return "\n".join(results)
 
-    links = re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>([^<]+)</a>', page)
-    for link, title in links:
-        if "duckduckgo.com" in link:
+    # Loose fallback for non-standard markup.
+    links = re.findall(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        page,
+        re.IGNORECASE | re.DOTALL,
+    )
+    for raw_link, title_html in links:
+        link = _normalize_ddg_result_url(raw_link)
+        if not link or "duckduckgo.com" in link:
             continue
-        results.append(f"- {title.strip()}\n  URL: {link}")
+        title_text = unescape(re.sub(r"<[^>]+>", "", title_html)).strip() or "No title"
+        results.append(f"- {title_text}\n  URL: {link}")
         if len(results) >= num_results:
             break
 
     return "\n".join(results) if results else "No results found."
+
+
+def _normalize_ddg_result_url(raw_link: str) -> str:
+    """Extract real destination URL from DDG redirect links."""
+    link = (raw_link or "").strip()
+    if not link:
+        return ""
+
+    if link.startswith("//"):
+        link = f"https:{link}"
+    elif link.startswith("/"):
+        link = f"https://duckduckgo.com{link}"
+
+    parsed = parse.urlparse(link)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        uddg = parse.parse_qs(parsed.query).get("uddg", [])
+        if uddg:
+            return parse.unquote(uddg[0])
+    return link
 
 
 def _list_dir_sync(directory: str, recursive: bool, depth: int) -> str:

@@ -36,6 +36,7 @@ class SkillContext:
         action: str,
         params: dict[str, Any],
         confirmed: bool = True,
+        include_exit_code: bool = True,
     ) -> str:
         """Send an action to the laptop agent via the gateway HTTP API."""
         try:
@@ -53,14 +54,24 @@ class SkillContext:
             return f"ERROR: {result.get('error', 'Unknown error')}"
 
         inner = result.get("result", {})
-        parts = []
-        if inner.get("stdout"):
-            parts.append(inner["stdout"])
-        if inner.get("stderr"):
-            parts.append(f"STDERR: {inner['stderr']}")
         rc = inner.get("returncode", "?")
-        parts.append(f"[exit code: {rc}]")
-        return "\n".join(parts) if parts else "OK"
+        stdout = (inner.get("stdout") or "").strip()
+        stderr = (inner.get("stderr") or "").strip()
+
+        if include_exit_code:
+            parts = []
+            if stdout:
+                parts.append(stdout)
+            if stderr:
+                parts.append(f"STDERR: {stderr}")
+            parts.append(f"[exit code: {rc}]")
+            return "\n".join(parts) if parts else "OK"
+
+        if str(rc) in {"0", "0.0"}:
+            return stdout or "OK"
+        if stdout and stderr:
+            return f"{stdout}\n{stderr}"
+        return stderr or stdout or "Action failed."
 
 
 class BaseSkill(ABC):

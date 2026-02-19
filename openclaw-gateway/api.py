@@ -31,6 +31,7 @@ from gateway import (
     send_emergency_stop,
     send_resume,
 )
+from ssh_tunnel_executor import get_ssh_executor
 
 logger = logging.getLogger("skynet.api")
 
@@ -40,8 +41,13 @@ logger = logging.getLogger("skynet.api")
 # ---------------------------------------------------------------------------
 
 async def handle_status(request: web.Request) -> web.Response:
+    ssh_exec = get_ssh_executor()
+    ssh_ok, ssh_detail = await ssh_exec.health_check()
     return web.json_response({
         "agent_connected": is_agent_connected(),
+        "ssh_fallback_enabled": ssh_exec.is_configured(),
+        "ssh_fallback_healthy": ssh_ok,
+        "ssh_fallback_target": ssh_detail,
     })
 
 
@@ -67,8 +73,14 @@ async def handle_action(request: web.Request) -> web.Response:
     confirmed = body.get("confirmed", False) is True
 
     if not is_agent_connected():
+        ssh_exec = get_ssh_executor()
+        if ssh_exec.is_configured():
+            result = await ssh_exec.execute_action(action, params, confirmed=confirmed)
+            if result.get("status") == "error":
+                return web.json_response(result, status=503)
+            return web.json_response(result)
         return web.json_response(
-            {"error": "No agent connected."}, status=503,
+            {"error": "No agent connected and SSH fallback is not configured."}, status=503,
         )
 
     try:
@@ -85,6 +97,8 @@ async def handle_action(request: web.Request) -> web.Response:
 
 
 async def handle_emergency_stop(request: web.Request) -> web.Response:
+    if not is_agent_connected() and get_ssh_executor().is_configured():
+        return web.json_response({"status": "not_applicable_in_ssh_mode"})
     try:
         await send_emergency_stop()
         return web.json_response({"status": "emergency_stop_sent"})
@@ -93,6 +107,8 @@ async def handle_emergency_stop(request: web.Request) -> web.Response:
 
 
 async def handle_resume(request: web.Request) -> web.Response:
+    if not is_agent_connected() and get_ssh_executor().is_configured():
+        return web.json_response({"status": "not_applicable_in_ssh_mode"})
     try:
         await send_resume()
         return web.json_response({"status": "resume_sent"})

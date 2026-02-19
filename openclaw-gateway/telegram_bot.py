@@ -59,9 +59,12 @@ _CHAT_SYSTEM_PROMPT = (
     "You are OpenClaw running through Telegram. "
     "Converse naturally in plain language and extract key details from user text. "
     "Never be dismissive or sarcastic. "
+    "For greetings (for example 'hi'), reply briefly and naturally without canned scripts. "
     "Use available tools/skills whenever execution, inspection, git, build, docker, or web research is needed. "
     "When asked to use coding agents, use check_coding_agents and run_coding_agent tools (codex/claude/cline CLIs). "
     "Ask concise clarifying questions only when required details are missing. "
+    "Do not return numbered option menus unless the user explicitly asks for options. "
+    "If a tool fails, explain it in one short sentence and continue with the best possible answer. "
     "Do not output JSON unless the user explicitly asks for JSON."
 )
 _last_project_id: str | None = None
@@ -1315,8 +1318,22 @@ async def cmd_agent_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         result = await _gateway_get("/status")
         connected = result.get("agent_connected", False)
-        icon = "CONNECTED" if connected else "NOT CONNECTED"
-        await update.message.reply_text(f"Agent: <b>{icon}</b>", parse_mode="HTML")
+        if connected:
+            await update.message.reply_text("Execution: <b>Worker Connected</b>", parse_mode="HTML")
+            return
+
+        ssh_enabled = result.get("ssh_fallback_enabled", False)
+        ssh_healthy = result.get("ssh_fallback_healthy", False)
+        ssh_target = result.get("ssh_fallback_target", "")
+        if ssh_enabled:
+            status = "SSH Tunnel Ready" if ssh_healthy else "SSH Tunnel Configured (unreachable)"
+            msg = f"Execution: <b>{status}</b>"
+            if ssh_target:
+                msg += f"\nTarget: <code>{html.escape(str(ssh_target))}</code>"
+            await update.message.reply_text(msg, parse_mode="HTML")
+            return
+
+        await update.message.reply_text("Execution: <b>No worker and no SSH fallback</b>", parse_mode="HTML")
     except Exception as exc:
         await update.message.reply_text(f"Gateway unreachable: {exc}")
 

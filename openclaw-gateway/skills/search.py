@@ -35,7 +35,13 @@ class SearchSkill(BaseSkill):
     async def execute(self, tool_name: str, tool_input: dict[str, Any], context: SkillContext) -> str:
         if tool_name != "web_search":
             return f"Unknown search tool: {tool_name}"
-        return await context.send_to_agent("web_search", {
+        result = await context.send_to_agent("web_search", {
             "query": tool_input.get("query", ""),
             "num_results": tool_input.get("num_results", 5),
-        }, confirmed=True)
+        }, confirmed=True, include_exit_code=False)
+        if result.startswith("ERROR:"):
+            return (
+                "Web search is temporarily unavailable right now. "
+                "Continue with a best-effort response and clearly state uncertainty."
+            )
+        return result

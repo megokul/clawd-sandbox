@@ -131,3 +131,38 @@ Key env flags:
 - `AUTO_APPROVE_AND_START`
 - `AUTO_PLAN_MIN_IDEAS`
 - `AUTO_APPROVE_GIT_ACTIONS`
+
+## SSH Tunnel Mode (No Worker Install)
+
+If you do not want to install `openclaw-agent` on your laptop, gateway actions can run over SSH instead.
+
+Set these env vars for the gateway:
+
+- `OPENCLAW_EXECUTION_MODE=ssh_tunnel`
+- `OPENCLAW_SSH_FALLBACK_ENABLED=1`
+- `OPENCLAW_SSH_HOST=<ssh-endpoint>` (for reverse tunnel, usually `127.0.0.1` on EC2 host)
+- `OPENCLAW_SSH_PORT=<port>` (example: `2222`)
+- `OPENCLAW_SSH_USER=<laptop-ssh-user>`
+- `OPENCLAW_SSH_KEY_PATH=<path-to-private-key>` or `OPENCLAW_SSH_PASSWORD=<password>`
+- `OPENCLAW_SSH_REMOTE_OS=windows`
+- `OPENCLAW_SSH_ALLOWED_ROOTS=E:\MyProjects`
+
+Recommended reverse tunnel from laptop to EC2:
+
+```powershell
+ssh -N -R 0.0.0.0:2222:localhost:22 ubuntu@<EC2_PUBLIC_IP>
+```
+
+Then point gateway at:
+
+- `OPENCLAW_SSH_HOST=host.docker.internal` (for Dockerized gateway)
+- `OPENCLAW_SSH_PORT=2222`
+
+Notes:
+- If your SSH server does not allow `0.0.0.0` reverse binds, enable `GatewayPorts clientspecified` on EC2 SSHD.
+- If you run gateway directly on the host (not in Docker), you can use `OPENCLAW_SSH_HOST=127.0.0.1`.
+
+Use `/agent_status` in Telegram:
+
+- `Worker Connected` = normal OpenClaw worker mode
+- `SSH Tunnel Ready` = tunnel fallback mode active and healthy
