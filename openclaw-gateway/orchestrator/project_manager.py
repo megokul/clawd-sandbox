@@ -12,6 +12,7 @@ import logging
 import re
 from typing import Any
 
+import aiohttp
 import aiosqlite
 
 from agents.roles import AGENT_CONFIGS, ALL_ROLES
@@ -19,6 +20,7 @@ from ai.provider_router import ProviderRouter
 from ai.tool_defs import PLANNING_TOOLS
 from ai.prompts import PLANNING_PROMPT
 from ai import context as ctx
+import bot_config as cfg
 from chathan.protocol import PlanSpec
 from db import store
 from search.web_search import WebSearcher
@@ -47,6 +49,11 @@ def _slugify(name: str) -> str:
     return slug or "project"
 
 
+def _join_path(base: str, leaf: str) -> str:
+    sep = "\\" if ("\\" in base or ":" in base) else "/"
+    return base.rstrip("\\/") + sep + leaf
+
+
 class ProjectManager:
     """High-level project lifecycle operations."""
 
@@ -71,15 +78,17 @@ class ProjectManager:
         if existing:
             raise ValueError(f"Project '{slug}' already exists.")
 
-        local_path = f"{self.base_dir}\\{slug}"
+        local_path = _join_path(self.base_dir, slug)
         project = await store.create_project(
             self.db, name=slug, display_name=name, local_path=local_path,
         )
+        bootstrap_summary = await self._bootstrap_project_workspace(project)
         await store.add_event(
             self.db, project["id"], "created",
-            f"Project '{name}' created",
+            f"Project '{name}' created at {local_path}",
+            detail=bootstrap_summary,
         )
-        return project
+        return await store.get_project(self.db, project["id"])
 
     async def add_idea(self, project_id: str, text: str) -> int:
         """Add an idea message to a project in ideation phase."""
@@ -388,3 +397,142 @@ class ProjectManager:
                 pass
 
         return None
+
+    # ------------------------------------------------------------------
+    # Project bootstrap
+    # ------------------------------------------------------------------
+
+    async def _bootstrap_project_workspace(self, project: dict[str, Any]) -> str:
+        """
+        Initialize project workspace and repository via the connected agent.
+
+        This method is best-effort: project creation should still succeed even
+        if agent bootstrap steps fail.
+        """
+        if not cfg.AUTO_BOOTSTRAP_PROJECT:
+            return "Bootstrap skipped (AUTO_BOOTSTRAP_PROJECT disabled)."
+
+        path = project["local_path"]
+        slug = project["name"]
+        readme_path = _join_path(path, "README.md")
+        bootstrap_notes: list[str] = []
+
+        ok, msg = await self._run_agent_action(
+            "create_directory",
+            {"directory": path},
+            confirmed=True,
+        )
+        bootstrap_notes.append(
+            "directory: ok" if ok else f"directory: failed ({msg})"
+        )
+        if not ok:
+            return "; ".join(bootstrap_notes)
+
+        readme = (
+            f"# {project['display_name']}\n\n"
+            "Project initialized by SKYNET/OpenClaw.\n\n"
+            "## Next Steps\n"
+            "1. Refine goals and milestones in Telegram.\n"
+            "2. Let autonomous agents implement milestone-by-milestone.\n"
+            "3. Review milestone updates and final deliverables.\n"
+        )
+        ok, msg = await self._run_agent_action(
+            "file_write",
+            {"file": readme_path, "content": readme},
+            confirmed=True,
+        )
+        bootstrap_notes.append("readme: ok" if ok else f"readme: failed ({msg})")
+
+        ok, msg = await self._run_agent_action(
+            "git_init",
+            {"working_dir": path},
+            confirmed=True,
+        )
+        bootstrap_notes.append("git_init: ok" if ok else f"git_init: failed ({msg})")
+
+        ok_add, msg_add = await self._run_agent_action(
+            "git_add_all",
+            {"working_dir": path},
+            confirmed=True,
+        )
+        ok_commit, msg_commit = await self._run_agent_action(
+            "git_commit",
+            {"working_dir": path, "message": "chore: initialize project scaffold"},
+            confirmed=True,
+        )
+        bootstrap_notes.append("git_add: ok" if ok_add else f"git_add: failed ({msg_add})")
+        bootstrap_notes.append(
+            "git_commit: ok" if ok_commit else f"git_commit: failed ({msg_commit})"
+        )
+
+        if cfg.AUTO_CREATE_GITHUB_REPO:
+            ok_gh, msg_gh = await self._run_agent_action(
+                "gh_create_repo",
+                {
+                    "working_dir": path,
+                    "repo_name": slug,
+                    "description": project.get("display_name", slug),
+                    "private": cfg.AUTO_CREATE_GITHUB_PRIVATE,
+                },
+                confirmed=True,
+            )
+            if ok_gh:
+                repo_url = self._extract_github_url(msg_gh) or ""
+                if not repo_url and cfg.GITHUB_USERNAME:
+                    repo_url = f"https://github.com/{cfg.GITHUB_USERNAME}/{slug}"
+                if repo_url:
+                    await store.update_project(
+                        self.db,
+                        project["id"],
+                        github_repo=repo_url,
+                    )
+                    bootstrap_notes.append(f"github: ok ({repo_url})")
+                else:
+                    bootstrap_notes.append("github: ok")
+            else:
+                bootstrap_notes.append(f"github: failed ({msg_gh})")
+
+        return "; ".join(bootstrap_notes)
+
+    async def _run_agent_action(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        confirmed: bool,
+    ) -> tuple[bool, str]:
+        payload = {
+            "action": action,
+            "params": params,
+            "confirmed": confirmed,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.scheduler.gateway_url}/action",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=130),
+                ) as resp:
+                    data = await resp.json()
+        except Exception as exc:
+            return False, str(exc)
+
+        if data.get("error"):
+            return False, str(data.get("error"))
+        if data.get("status") == "error":
+            return False, data.get("error", "Unknown error")
+
+        inner = data.get("result", {})
+        rc = inner.get("returncode", 0)
+        if rc != 0:
+            stderr = (inner.get("stderr") or "").strip()
+            stdout = (inner.get("stdout") or "").strip()
+            return False, stderr or stdout or f"exit code {rc}"
+        return True, (inner.get("stdout") or "").strip()
+
+    @staticmethod
+    def _extract_github_url(text: str) -> str | None:
+        if not text:
+            return None
+        match = re.search(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", text)
+        return match.group(0) if match else None

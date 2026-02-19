@@ -68,6 +68,30 @@ AI_PROVIDER_PRIORITY: str = os.environ.get(
     "AI_PROVIDER_PRIORITY",
     "gemini,groq,openrouter,deepseek,openai,claude,ollama",
 )
+AUTO_APPROVE_GIT_ACTIONS: bool = os.environ.get(
+    "AUTO_APPROVE_GIT_ACTIONS",
+    os.environ.get("OPENCLAW_AUTO_APPROVE_GIT_ACTIONS", "1"),
+).strip().lower() in {"1", "true", "yes", "on"}
+AUTO_APPROVE_AND_START: bool = os.environ.get(
+    "AUTO_APPROVE_AND_START",
+    os.environ.get("OPENCLAW_AUTO_APPROVE_AND_START", "1"),
+).strip().lower() in {"1", "true", "yes", "on"}
+AUTO_PLAN_MIN_IDEAS: int = int(os.environ.get(
+    "AUTO_PLAN_MIN_IDEAS",
+    os.environ.get("OPENCLAW_AUTO_PLAN_MIN_IDEAS", "3"),
+))
+AUTO_BOOTSTRAP_PROJECT: bool = os.environ.get(
+    "AUTO_BOOTSTRAP_PROJECT",
+    os.environ.get("OPENCLAW_AUTO_BOOTSTRAP_PROJECT", "1"),
+).strip().lower() in {"1", "true", "yes", "on"}
+AUTO_CREATE_GITHUB_REPO: bool = os.environ.get(
+    "AUTO_CREATE_GITHUB_REPO",
+    os.environ.get("OPENCLAW_AUTO_CREATE_GITHUB_REPO", "1"),
+).strip().lower() in {"1", "true", "yes", "on"}
+AUTO_CREATE_GITHUB_PRIVATE: bool = os.environ.get(
+    "AUTO_CREATE_GITHUB_PRIVATE",
+    os.environ.get("OPENCLAW_AUTO_CREATE_GITHUB_PRIVATE", "0"),
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # Ollama (local laptop LLM)
@@ -101,7 +125,7 @@ DB_PATH: str = os.environ.get(
 # ---------------------------------------------------------------------------
 PROJECT_BASE_DIR: str = os.environ.get(
     "SKYNET_PROJECT_BASE_DIR",
-    os.environ.get("OPENCLAW_PROJECT_BASE_DIR", r"E:\OpenClaw\projects"),
+    os.environ.get("OPENCLAW_PROJECT_BASE_DIR", r"E:\MyProjects"),
 )
 
 # ---------------------------------------------------------------------------

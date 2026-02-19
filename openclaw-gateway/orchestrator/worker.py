@@ -80,6 +80,10 @@ class Worker:
         await self._notify("started", f"Coding started for {project['display_name']}")
 
         try:
+            milestone_order, milestone_totals = self._build_milestone_index(tasks)
+            milestone_done: dict[str, int] = {name: 0 for name in milestone_order}
+            current_milestone: str | None = None
+
             # Execute each task.
             total = len(tasks)
             for i, task in enumerate(tasks):
@@ -94,10 +98,46 @@ class Worker:
                     await self.pause_event.wait()
                     await self._notify("resumed", "Project resumed.")
 
+                milestone_name = self._task_milestone(task)
+                if milestone_name != current_milestone:
+                    if current_milestone is not None:
+                        await self._notify(
+                            "milestone_review",
+                            self._milestone_summary(
+                                current_milestone,
+                                milestone_done.get(current_milestone, 0),
+                                milestone_totals.get(current_milestone, 0),
+                                i,
+                                total,
+                            ),
+                        )
+                    current_milestone = milestone_name
+                    await self._notify(
+                        "milestone_started",
+                        self._milestone_start_summary(
+                            milestone_name,
+                            milestone_order,
+                            milestone_totals,
+                        ),
+                    )
+
                 await self._execute_task(project, task, i + 1, total)
+                milestone_done[milestone_name] = milestone_done.get(milestone_name, 0) + 1
 
             # Final testing phase.
             await self._final_testing(project)
+
+            if current_milestone is not None:
+                await self._notify(
+                    "milestone_review",
+                    self._milestone_summary(
+                        current_milestone,
+                        milestone_done.get(current_milestone, 0),
+                        milestone_totals.get(current_milestone, 0),
+                        total,
+                        total,
+                    ),
+                )
 
             await store.update_project(self.db, self.project_id, status="completed")
             await self._notify(
@@ -110,6 +150,52 @@ class Worker:
             logger.exception("Worker error for project %s", self.project_id)
             await store.update_project(self.db, self.project_id, status="failed")
             await self._notify("error", f"Project failed: {exc}")
+
+    @staticmethod
+    def _task_milestone(task: dict[str, Any]) -> str:
+        name = (task.get("milestone") or "").strip()
+        return name or "General"
+
+    def _build_milestone_index(
+        self,
+        tasks: list[dict[str, Any]],
+    ) -> tuple[list[str], dict[str, int]]:
+        order: list[str] = []
+        totals: dict[str, int] = {}
+        for task in tasks:
+            name = self._task_milestone(task)
+            if name not in totals:
+                order.append(name)
+                totals[name] = 0
+            totals[name] += 1
+        return order, totals
+
+    @staticmethod
+    def _milestone_summary(
+        milestone: str,
+        done_in_milestone: int,
+        total_in_milestone: int,
+        done_all: int,
+        total_all: int,
+    ) -> str:
+        return (
+            f"Milestone review: {milestone}\n"
+            f"Milestone progress: {done_in_milestone}/{total_in_milestone} tasks\n"
+            f"Overall progress: {done_all}/{total_all} tasks"
+        )
+
+    @staticmethod
+    def _milestone_start_summary(
+        milestone: str,
+        milestone_order: list[str],
+        milestone_totals: dict[str, int],
+    ) -> str:
+        idx = milestone_order.index(milestone) + 1 if milestone in milestone_order else 1
+        total = len(milestone_order) if milestone_order else 1
+        return (
+            f"Starting milestone {idx}/{total}: {milestone} "
+            f"({milestone_totals.get(milestone, 0)} tasks)"
+        )
 
     @staticmethod
     def _classify_task(task: dict) -> str:

@@ -57,6 +57,13 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AI_PROVIDER_PRIORITY: ${{ secrets.AI_PROVIDER_PRIORITY }}
+      AUTO_APPROVE_GIT_ACTIONS: ${{ secrets.AUTO_APPROVE_GIT_ACTIONS }}
+      AUTO_APPROVE_AND_START: ${{ secrets.AUTO_APPROVE_AND_START }}
+      AUTO_PLAN_MIN_IDEAS: ${{ secrets.AUTO_PLAN_MIN_IDEAS }}
+      AUTO_BOOTSTRAP_PROJECT: ${{ secrets.AUTO_BOOTSTRAP_PROJECT }}
+      AUTO_CREATE_GITHUB_REPO: ${{ secrets.AUTO_CREATE_GITHUB_REPO }}
+      AUTO_CREATE_GITHUB_PRIVATE: ${{ secrets.AUTO_CREATE_GITHUB_PRIVATE }}
+      SKYNET_PROJECT_BASE_DIR: ${{ secrets.SKYNET_PROJECT_BASE_DIR }}
       SKYNET_EXTERNAL_SKILL_URLS: ${{ secrets.SKYNET_EXTERNAL_SKILL_URLS }}
       SKYNET_EXTERNAL_SKILLS_DIR: ${{ secrets.SKYNET_EXTERNAL_SKILLS_DIR }}
     steps:
@@ -95,6 +102,13 @@ jobs:
             printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY}"
             printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY}"
             printf 'AI_PROVIDER_PRIORITY=%s\n' "${AI_PROVIDER_PRIORITY:-gemini,groq,openrouter,deepseek,openai,claude,ollama}"
+            printf 'AUTO_APPROVE_GIT_ACTIONS=%s\n' "${AUTO_APPROVE_GIT_ACTIONS:-1}"
+            printf 'AUTO_APPROVE_AND_START=%s\n' "${AUTO_APPROVE_AND_START:-1}"
+            printf 'AUTO_PLAN_MIN_IDEAS=%s\n' "${AUTO_PLAN_MIN_IDEAS:-3}"
+            printf 'AUTO_BOOTSTRAP_PROJECT=%s\n' "${AUTO_BOOTSTRAP_PROJECT:-1}"
+            printf 'AUTO_CREATE_GITHUB_REPO=%s\n' "${AUTO_CREATE_GITHUB_REPO:-1}"
+            printf 'AUTO_CREATE_GITHUB_PRIVATE=%s\n' "${AUTO_CREATE_GITHUB_PRIVATE:-0}"
+            printf 'SKYNET_PROJECT_BASE_DIR=%s\n' "${SKYNET_PROJECT_BASE_DIR:-E:\\MyProjects}"
             printf 'SKYNET_EXTERNAL_SKILL_URLS=%s\n' "${SKYNET_EXTERNAL_SKILL_URLS}"
             printf 'SKYNET_EXTERNAL_SKILLS_DIR=%s\n' "${SKYNET_EXTERNAL_SKILLS_DIR}"
           } > .env.ci

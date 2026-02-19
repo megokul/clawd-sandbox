@@ -423,6 +423,17 @@ async def _capture_idea(update: Update, text: str) -> None:
 
     try:
         count = await _project_manager.add_idea(project["id"], text)
+        if cfg.AUTO_APPROVE_AND_START and count >= max(cfg.AUTO_PLAN_MIN_IDEAS, 1):
+            await update.message.reply_text(
+                (
+                    f"Added idea #{count} to <b>{html.escape(project['display_name'])}</b>.\n"
+                    f"Enough details received. Auto-generating plan and starting execution."
+                ),
+                parse_mode="HTML",
+            )
+            await _auto_plan_and_start(update, project["id"], project["display_name"])
+            return
+
         await update.message.reply_text(
             f"Added idea #{count} to <b>{html.escape(project['display_name'])}</b>.\n"
             f"Send more or use /plan to generate the plan.",
@@ -430,6 +441,31 @@ async def _capture_idea(update: Update, text: str) -> None:
         )
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
+
+
+async def _auto_plan_and_start(update: Update, project_id: str, display_name: str) -> None:
+    """Generate plan, approve it, and start execution without extra user prompts."""
+    try:
+        plan = await _project_manager.generate_plan(project_id)
+        await _project_manager.approve_plan(project_id)
+        await _project_manager.start_execution(project_id)
+
+        milestones = plan.get("milestones", []) or []
+        milestone_names = [m.get("name", "").strip() for m in milestones if m.get("name")]
+        top = ", ".join(milestone_names[:3]) if milestone_names else "No milestones listed."
+        if len(milestone_names) > 3:
+            top += f", and {len(milestone_names) - 3} more"
+
+        await update.message.reply_text(
+            (
+                f"Autonomous execution started for <b>{html.escape(display_name)}</b>.\n"
+                f"Top milestones: {html.escape(top)}\n"
+                "I will report progress at milestone boundaries."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"I couldn't auto-start execution: {exc}")
 
 
 def _clean_entity(text: str) -> str:
@@ -673,9 +709,15 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
         try:
             project = await _project_manager.create_project(name)
             _last_project_id = project["id"]
+            repo_line = (
+                f"\nGitHub: {project.get('github_repo')}"
+                if project.get("github_repo") else ""
+            )
             await update.message.reply_text(
-                f"Created project '{_project_display(project)}'. "
-                "Now share ideas in natural language, or say 'generate a plan'."
+                (
+                    f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}\n"
+                    "Share details naturally. Once details are enough, I can auto-plan and execute."
+                )
             )
         except Exception as exc:
             await update.message.reply_text(f"I couldn't create that project: {exc}")
@@ -707,6 +749,19 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
         try:
             count = await _project_manager.add_idea(project["id"], idea_text)
             _last_project_id = project["id"]
+            if cfg.AUTO_APPROVE_AND_START and count >= max(cfg.AUTO_PLAN_MIN_IDEAS, 1):
+                await update.message.reply_text(
+                    (
+                        f"Added that as idea #{count} for '{_project_display(project)}'.\n"
+                        "Enough detail captured. Auto-generating plan and starting execution."
+                    )
+                )
+                await _auto_plan_and_start(
+                    update,
+                    project["id"],
+                    _project_display(project),
+                )
+                return True
             await update.message.reply_text(
                 f"Added that as idea #{count} for '{_project_display(project)}'."
             )
@@ -731,16 +786,28 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
             top_text = ", ".join(top[:3]) if top else "No milestones listed."
             if len(top) > 3:
                 top_text += f", and {len(top) - 3} more"
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Approve", callback_data=f"approve_plan:{project['id']}"),
-                InlineKeyboardButton("Cancel", callback_data=f"cancel_plan:{project['id']}"),
-            ]])
-            await update.message.reply_text(
-                f"Plan ready for '{_project_display(project)}'.\n"
-                f"{summary}\n\n"
-                f"Top milestones: {top_text}",
-                reply_markup=keyboard,
-            )
+            if cfg.AUTO_APPROVE_AND_START:
+                await _project_manager.approve_plan(project["id"])
+                await _project_manager.start_execution(project["id"])
+                await update.message.reply_text(
+                    (
+                        f"Plan generated and approved for '{_project_display(project)}'.\n"
+                        f"{summary}\n\n"
+                        f"Top milestones: {top_text}\n"
+                        "Execution started. I will post milestone review updates."
+                    ),
+                )
+            else:
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Approve", callback_data=f"approve_plan:{project['id']}"),
+                    InlineKeyboardButton("Cancel", callback_data=f"cancel_plan:{project['id']}"),
+                ]])
+                await update.message.reply_text(
+                    f"Plan ready for '{_project_display(project)}'.\n"
+                    f"{summary}\n\n"
+                    f"Top milestones: {top_text}",
+                    reply_markup=keyboard,
+                )
         except Exception as exc:
             await update.message.reply_text(f"I couldn't generate the plan: {exc}")
         return True
@@ -817,13 +884,21 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
 
 async def on_project_progress(project_id: str, event_type: str, summary: str) -> None:
     """Called by the orchestrator to send progress updates to Telegram."""
-    icons = {
-        "started": "🚀", "task_started": "⚙️", "task_completed": "✅",
-        "testing": "🧪", "completed": "🎉", "error": "❌",
-        "paused": "⏸️", "resumed": "▶️", "cancelled": "🛑",
+    tags = {
+        "started": "[START]",
+        "task_started": "[TASK]",
+        "task_completed": "[DONE]",
+        "milestone_started": "[MILESTONE]",
+        "milestone_review": "[REVIEW]",
+        "testing": "[TEST]",
+        "completed": "[COMPLETE]",
+        "error": "[ERROR]",
+        "paused": "[PAUSE]",
+        "resumed": "[RESUME]",
+        "cancelled": "[CANCEL]",
     }
-    icon = icons.get(event_type, "📋")
-    await _send_to_user(f"{icon} {html.escape(summary)}")
+    tag = tags.get(event_type, "[INFO]")
+    await _send_to_user(f"{tag} {html.escape(summary)}")
 
 
 # ------------------------------------------------------------------
@@ -840,6 +915,12 @@ async def request_worker_approval(
     Sends an Approve/Deny message to Telegram and blocks until the
     user responds.
     """
+    if cfg.AUTO_APPROVE_GIT_ACTIONS and action in {"git_push", "gh_create_repo"}:
+        await _send_to_user(
+            f"[AUTO-APPROVED] {html.escape(action)} for project {html.escape(project_id)}",
+        )
+        return True
+
     global _approval_counter
     _approval_counter += 1
     key = f"wa{_approval_counter}"
@@ -959,10 +1040,17 @@ async def cmd_newproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     name = " ".join(context.args)
     try:
         project = await _project_manager.create_project(name)
+        repo_line = (
+            f"\n<b>GitHub:</b> {html.escape(project.get('github_repo', ''))}"
+            if project.get("github_repo") else ""
+        )
         await update.message.reply_text(
             f"<b>Project created:</b> {html.escape(project['display_name'])}\n\n"
-            f"Send me your ideas as text messages.\n"
-            f"When done, use /plan to generate the project plan.",
+            f"<b>Path:</b> <code>{html.escape(project.get('local_path', ''))}</code>"
+            f"{repo_line}\n\n"
+            f"Send ideas as text messages.\n"
+            f"I can auto-plan/start once enough details are captured "
+            f"(threshold: {cfg.AUTO_PLAN_MIN_IDEAS} ideas).",
             parse_mode="HTML",
         )
     except Exception as exc:
@@ -1009,19 +1097,31 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             task_list = "\n".join(f"    - {t.get('title', '?')}" for t in tasks)
             milestone_text += f"\n{i}. <b>{html.escape(ms.get('name', ''))}</b> (~{est} min)\n{task_list}\n"
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Approve", callback_data=f"approve_plan:{project['id']}"),
-            InlineKeyboardButton("Cancel", callback_data=f"cancel_plan:{project['id']}"),
-        ]])
-
-        await update.message.reply_text(
-            f"<b>PROJECT PLAN: {html.escape(project['display_name'])}</b>\n"
-            f"{'=' * 30}\n"
-            f"{html.escape(plan.get('summary', ''))}\n\n"
-            f"<b>Milestones:</b>{milestone_text}",
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
+        if cfg.AUTO_APPROVE_AND_START:
+            await _project_manager.approve_plan(project["id"])
+            await _project_manager.start_execution(project["id"])
+            await update.message.reply_text(
+                f"<b>PROJECT PLAN: {html.escape(project['display_name'])}</b>\n"
+                f"{'=' * 30}\n"
+                f"{html.escape(plan.get('summary', ''))}\n\n"
+                f"<b>Milestones:</b>{milestone_text}\n"
+                f"\n<b>Autonomous execution started.</b> "
+                f"Milestone reviews and status updates will be posted automatically.",
+                parse_mode="HTML",
+            )
+        else:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Approve", callback_data=f"approve_plan:{project['id']}"),
+                InlineKeyboardButton("Cancel", callback_data=f"cancel_plan:{project['id']}"),
+            ]])
+            await update.message.reply_text(
+                f"<b>PROJECT PLAN: {html.escape(project['display_name'])}</b>\n"
+                f"{'=' * 30}\n"
+                f"{html.escape(plan.get('summary', ''))}\n\n"
+                f"<b>Milestones:</b>{milestone_text}",
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
     except Exception as exc:
         await update.message.reply_text(f"Error generating plan: {exc}")
 
@@ -1198,6 +1298,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /run_tests [path]\n"
         "  /lint [path]\n"
         "  /build [path]\n"
+        "  /vscode <path> â€” open folder/file in VS Code on laptop\n"
+        "  /check_agents â€” check codex/claude/cline CLI availability\n"
+        "  /run_agent <agent> [path=<dir>] <prompt> â€” run coding agent\n"
         "  /close_app [name]\n\n"
         "<b>Controls:</b>\n"
         "  /emergency_stop — kill everything\n"
@@ -1265,6 +1368,70 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(_format_result(result), parse_mode="HTML")
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_vscode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /vscode <path>")
+        return
+    path = " ".join(context.args).strip()
+    await _ask_confirm(
+        update,
+        "open_in_vscode",
+        {"path": path},
+        f"Path: <code>{html.escape(path)}</code>",
+    )
+
+
+async def cmd_check_agents(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    try:
+        result = await _send_action("check_coding_agents", {}, confirmed=True)
+        await update.message.reply_text(_format_result(result), parse_mode="HTML")
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /run_agent <codex|claude|cline> [path=<dir>] <prompt>",
+        )
+        return
+
+    agent = context.args[0].strip().lower()
+    if agent not in {"codex", "claude", "cline"}:
+        await update.message.reply_text("Agent must be one of: codex, claude, cline")
+        return
+
+    working_dir = cfg.DEFAULT_WORKING_DIR
+    prompt_start_index = 1
+    if len(context.args) >= 3 and context.args[1].startswith("path="):
+        working_dir = context.args[1][len("path="):].strip() or working_dir
+        prompt_start_index = 2
+
+    prompt = " ".join(context.args[prompt_start_index:]).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "Usage: /run_agent <codex|claude|cline> [path=<dir>] <prompt>",
+        )
+        return
+
+    await _ask_confirm(
+        update,
+        "run_coding_agent",
+        {"agent": agent, "prompt": prompt, "working_dir": working_dir},
+        (
+            f"Agent: <code>{html.escape(agent)}</code>\n"
+            f"Path: <code>{html.escape(working_dir)}</code>\n"
+            f"Prompt: <i>{html.escape(prompt)}</i>"
+        ),
+    )
 
 
 async def cmd_git_commit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1503,6 +1670,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("run_tests", cmd_run_tests))
     app.add_handler(CommandHandler("lint", cmd_lint))
     app.add_handler(CommandHandler("build", cmd_build))
+    app.add_handler(CommandHandler("vscode", cmd_vscode))
+    app.add_handler(CommandHandler("check_agents", cmd_check_agents))
+    app.add_handler(CommandHandler("run_agent", cmd_run_agent))
     app.add_handler(CommandHandler("git_commit", cmd_git_commit))
     app.add_handler(CommandHandler("install_deps", cmd_install_deps))
     app.add_handler(CommandHandler("close_app", cmd_close_app))
@@ -1517,4 +1687,5 @@ def build_app() -> Application:
 
     _bot_app = app
     return app
+
 

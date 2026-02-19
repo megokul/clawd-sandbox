@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from typing import Any
+import bot_config as cfg
 from .base import BaseSkill, SkillContext
 
 
@@ -89,13 +90,20 @@ class GitSkill(BaseSkill):
         ]
 
     async def execute(self, tool_name: str, tool_input: dict[str, Any], context: SkillContext) -> str:
-        # git_push and gh_create_repo need Telegram approval
-        if tool_name in self.requires_approval and context.request_approval:
+        needs_manual_approval = (
+            tool_name in self.requires_approval and not cfg.AUTO_APPROVE_GIT_ACTIONS
+        )
+        if needs_manual_approval:
+            if not context.request_approval:
+                return f"Action '{tool_name}' requires approval, but approval channel is unavailable."
             approved = await context.request_approval(
                 context.project_id, tool_name, tool_input,
             )
             if not approved:
                 return f"Action '{tool_name}' was denied by the user."
 
-        confirmed = tool_name in self.plan_auto_approved
+        confirmed = (
+            tool_name in self.plan_auto_approved
+            or tool_name in self.requires_approval
+        )
         return await context.send_to_agent(tool_name, tool_input, confirmed=confirmed)

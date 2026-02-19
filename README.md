@@ -106,3 +106,28 @@ Default provider priority:
 7. `ollama`
 
 Override via `AI_PROVIDER_PRIORITY` (comma-separated).
+
+## Autonomous Project Startup
+
+Default behavior now supports end-to-end autonomous project execution:
+
+1. New projects are created under `SKYNET_PROJECT_BASE_DIR` (default `E:\MyProjects`).
+2. On project creation, the gateway bootstraps:
+   - project directory
+   - `README.md`
+   - `git init` + initial commit
+   - optional `gh_create_repo`
+3. After enough idea detail (`AUTO_PLAN_MIN_IDEAS`, default `3`), the system can auto:
+   - generate plan
+   - approve plan
+   - start execution
+4. Progress updates are posted at milestone boundaries (`milestone_started`, `milestone_review`).
+
+Key env flags:
+- `SKYNET_PROJECT_BASE_DIR`
+- `AUTO_BOOTSTRAP_PROJECT`
+- `AUTO_CREATE_GITHUB_REPO`
+- `AUTO_CREATE_GITHUB_PRIVATE`
+- `AUTO_APPROVE_AND_START`
+- `AUTO_PLAN_MIN_IDEAS`
+- `AUTO_APPROVE_GIT_ACTIONS`
