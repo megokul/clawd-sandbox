@@ -78,7 +78,10 @@ def _ps_quote(value: str) -> str:
 
 def _build_windows_command(args: list[str], cwd: str | None = None) -> str:
     cmd = " ".join(_ps_quote(str(a)) for a in args)
-    script_lines = ["$ErrorActionPreference = 'Stop'"]
+    script_lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "$ProgressPreference = 'SilentlyContinue'",
+    ]
     if cwd:
         script_lines.append(f"Set-Location -LiteralPath {_ps_quote(cwd)}")
     script_lines.append(f"& {cmd}")
@@ -91,6 +94,20 @@ def _build_windows_command(args: list[str], cwd: str | None = None) -> str:
         "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
         f"-EncodedCommand {encoded}"
     )
+
+
+def _sanitize_powershell_output(text: str) -> str:
+    if not text:
+        return text
+    cleaned = text.replace("_x000D__x000A_", "\n").replace("_x000D_", "\r").replace("_x000A_", "\n")
+    if "<Objs Version=" in cleaned and "</Objs>" in cleaned:
+        # Keep only message payloads from CLIXML blocks.
+        parts = re.findall(r"<S S=\"(?:Error|Warning|Verbose)\">(.*?)</S>", cleaned, flags=re.DOTALL)
+        if parts:
+            cleaned = "\n".join(parts)
+        else:
+            cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    return cleaned.strip()
 
 
 def _build_linux_command(args: list[str], cwd: str | None = None) -> str:
@@ -294,6 +311,9 @@ class SSHTunnelExecutor:
         )
         out = stdout.read().decode("utf-8", errors="replace")[:8192]
         err = stderr.read().decode("utf-8", errors="replace")[:4096]
+        if self.remote_os == "windows":
+            out = _sanitize_powershell_output(out)
+            err = _sanitize_powershell_output(err)
         rc = stdout.channel.recv_exit_status()
         return {"returncode": int(rc), "stdout": out, "stderr": err}
 
@@ -373,6 +393,14 @@ class SSHTunnelExecutor:
             private = params.get("private", False) is True
             if not re.match(r"^[a-zA-Z0-9._-]+$", repo_name):
                 return {"returncode": 1, "stdout": "", "stderr": "Invalid repo name characters."}
+            if self.remote_os == "windows":
+                exists = self._run_command(client, ["where", "gh"], cwd=None)
+                if exists.get("returncode", 1) != 0:
+                    return {
+                        "returncode": 127,
+                        "stdout": "",
+                        "stderr": "GitHub CLI (gh) is not installed on the worker laptop.",
+                    }
             visibility = "--private" if private else "--public"
             args = ["gh", "repo", "create", repo_name, visibility, "--source=.", "--push"]
             if description:
