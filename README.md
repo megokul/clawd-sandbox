@@ -31,6 +31,16 @@ make run-api
 make run-bot
 ```
 
+## Docker
+
+```bash
+# Full stack (SKYNET + OpenClaw gateway)
+docker compose up -d skynet-api openclaw-gateway
+
+# SKYNET only (when OpenClaw already runs elsewhere)
+docker compose -f docker-compose.skynet-only.yml up -d
+```
+
 ## Tests
 
 ```bash

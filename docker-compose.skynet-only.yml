@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  skynet-api:
+    build:
+      context: .
+      dockerfile: docker/skynet/Dockerfile
+    container_name: skynet-api
+    ports:
+      - "8000:8000"
+    environment:
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - SKYNET_DB_PATH=/app/data/skynet.db
+      - OPENCLAW_GATEWAY_URL=${OPENCLAW_GATEWAY_URL:-http://host.docker.internal:8766}
+      - OPENCLAW_GATEWAY_URLS=${OPENCLAW_GATEWAY_URLS:-}
+      - SKYNET_API_KEY=${SKYNET_API_KEY:-}
+    volumes:
+      - skynet-data:/app/data
+      - ./skynet:/app/skynet:ro
+    # Linux Docker does not always resolve host.docker.internal by default.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - skynet-network
+
+volumes:
+  skynet-data:
+    driver: local
+
+networks:
+  skynet-network:
+    driver: bridge

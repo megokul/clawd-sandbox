@@ -35,11 +35,14 @@ services:
     container_name: openclaw-gateway
     ports:
       - "8765:8765"  # WebSocket
-      - "8766:8766"  # HTTP API
+    expose:
+      - "8766"       # HTTP API (internal to docker network only)
     environment:
       - SKYNET_AUTH_TOKEN=${SKYNET_AUTH_TOKEN}
       - SKYNET_ORCHESTRATOR_URL=http://skynet-api:8000
       - OPENCLAW_GATEWAY_URL=http://openclaw-gateway:8766
+      - OPENCLAW_HTTP_HOST=${OPENCLAW_HTTP_HOST:-0.0.0.0}
+      - OPENCLAW_HTTP_PORT=${OPENCLAW_HTTP_PORT:-8766}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_ALLOWED_USER_ID=${TELEGRAM_ALLOWED_USER_ID}
       - DISABLE_TELEGRAM_BOT=${DISABLE_TELEGRAM_BOT:-0}

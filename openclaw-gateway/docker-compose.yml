@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     ports:
       - "8765:8765"   # WebSocket (agent connection)
-      - "8766:8766"   # HTTP API (internal)
+      - "8766:8766"   # HTTP API (for external SKYNET if needed)
     volumes:
       - gateway-data:/app/data
       - ${OPENCLAW_TLS_CERT_DIR:-./certs}:/app/certs:ro
@@ -35,6 +35,9 @@ services:
       # TLS (paths inside container)
       - OPENCLAW_TLS_CERT=/app/certs/cert.pem
       - OPENCLAW_TLS_KEY=/app/certs/key.pem
+      # Gateway HTTP bind (set 0.0.0.0 for container-to-container access)
+      - OPENCLAW_HTTP_HOST=${OPENCLAW_HTTP_HOST:-0.0.0.0}
+      - OPENCLAW_HTTP_PORT=${OPENCLAW_HTTP_PORT:-8766}
       # Logging
       - OPENCLAW_LOG_LEVEL=${OPENCLAW_LOG_LEVEL:-INFO}
     logging:
