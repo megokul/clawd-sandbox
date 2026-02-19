@@ -1405,6 +1405,19 @@ async def cmd_agent_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     try:
         result = await _gateway_get("/status")
+        execution_mode = str(result.get("execution_mode", "")).strip().lower()
+        if execution_mode == "ssh_tunnel":
+            ssh_enabled = result.get("ssh_fallback_enabled", False)
+            ssh_healthy = result.get("ssh_fallback_healthy", False)
+            ssh_target = result.get("ssh_fallback_target", "")
+            if ssh_enabled:
+                status = "SSH Tunnel Ready" if ssh_healthy else "SSH Tunnel Configured (unreachable)"
+                msg = f"Execution: <b>{status}</b>\nMode: <code>ssh_tunnel (forced)</code>"
+                if ssh_target:
+                    msg += f"\nTarget: <code>{html.escape(str(ssh_target))}</code>"
+                await update.message.reply_text(msg, parse_mode="HTML")
+                return
+
         connected = result.get("agent_connected", False)
         if connected:
             await update.message.reply_text("Execution: <b>Worker Connected</b>", parse_mode="HTML")

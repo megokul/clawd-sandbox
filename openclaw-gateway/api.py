@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 
 from aiohttp import web
 
@@ -36,6 +37,14 @@ from ssh_tunnel_executor import get_ssh_executor
 logger = logging.getLogger("skynet.api")
 
 
+_SSH_ONLY_MODES = {"ssh", "ssh_tunnel", "tunnel", "ssh-only"}
+
+
+def _force_ssh_mode(ssh_configured: bool) -> bool:
+    mode = os.environ.get("OPENCLAW_EXECUTION_MODE", "").strip().lower()
+    return ssh_configured and mode in _SSH_ONLY_MODES
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -43,11 +52,14 @@ logger = logging.getLogger("skynet.api")
 async def handle_status(request: web.Request) -> web.Response:
     ssh_exec = get_ssh_executor()
     ssh_ok, ssh_detail = await ssh_exec.health_check()
+    ssh_configured = ssh_exec.is_configured()
+    force_ssh = _force_ssh_mode(ssh_configured)
     return web.json_response({
         "agent_connected": is_agent_connected(),
-        "ssh_fallback_enabled": ssh_exec.is_configured(),
+        "ssh_fallback_enabled": ssh_configured,
         "ssh_fallback_healthy": ssh_ok,
         "ssh_fallback_target": ssh_detail,
+        "execution_mode": "ssh_tunnel" if force_ssh else "agent_preferred",
     })
 
 
@@ -72,13 +84,20 @@ async def handle_action(request: web.Request) -> web.Response:
     params = body.get("params", {})
     confirmed = body.get("confirmed", False) is True
 
-    if not is_agent_connected():
-        ssh_exec = get_ssh_executor()
-        if ssh_exec.is_configured():
+    ssh_exec = get_ssh_executor()
+    ssh_configured = ssh_exec.is_configured()
+    force_ssh = _force_ssh_mode(ssh_configured)
+    if force_ssh or not is_agent_connected():
+        if ssh_configured:
             result = await ssh_exec.execute_action(action, params, confirmed=confirmed)
             if result.get("status") == "error":
                 return web.json_response(result, status=503)
             return web.json_response(result)
+        if force_ssh:
+            return web.json_response(
+                {"error": "SSH tunnel mode is enabled but SSH executor is not configured."},
+                status=503,
+            )
         return web.json_response(
             {"error": "No agent connected and SSH fallback is not configured."}, status=503,
         )
