@@ -751,6 +751,31 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
             "prompt": _clean_entity(match.group("prompt")),
         }
 
+    # Switch Cline provider/model
+    provider_pattern = r"(?P<provider>gemini|deepseek|groq|openrouter|openai|anthropic)"
+    model_pattern = r"(?:.*?\bmodel\s+(?P<model>[^,;]+))?"
+    match = re.search(
+        rf"\b(?:switch|set|change|configure)\s+cline(?:\s+(?:to|provider|using|use)\s+)?{provider_pattern}\b{model_pattern}",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            rf"\buse\s+{provider_pattern}\s+for\s+cline\b{model_pattern}",
+            raw,
+            flags=re.IGNORECASE,
+        )
+    if match:
+        out = {
+            "intent": "configure_coding_agent",
+            "agent": "cline",
+            "provider": _clean_entity(match.group("provider")).lower(),
+        }
+        model = _clean_entity(match.groupdict().get("model") or "")
+        if model:
+            out["model"] = model
+        return out
+
     if lowered in {"help", "show help", "what can you do"}:
         return {"intent": "help"}
 
@@ -845,7 +870,8 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
             "'generate plan for API dashboard', "
             "'status of API dashboard', 'pause API dashboard', "
             "'check coding agents', 'open current project in VS Code', "
-            "'use codex to add JWT auth'."
+            "'use codex to add JWT auth', "
+            "'switch cline to gemini model gemini-2.0-flash'."
         )
         return True
 
@@ -901,6 +927,27 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
             await update.message.reply_text(_format_result(result), parse_mode="HTML")
         except Exception as exc:
             await update.message.reply_text(f"I couldn't run {agent}: {exc}")
+        return True
+
+    if intent == "configure_coding_agent":
+        provider = _clean_entity(intent_data.get("provider", "")).lower()
+        model = _clean_entity(intent_data.get("model", ""))
+        if provider not in {"gemini", "deepseek", "groq", "openrouter", "openai", "anthropic"}:
+            await update.message.reply_text(
+                "Provider must be one of: gemini, deepseek, groq, openrouter, openai, anthropic.",
+            )
+            return True
+        params = {"agent": "cline", "provider": provider}
+        if model:
+            params["model"] = model
+        try:
+            await update.message.reply_text(
+                f"Switching Cline provider to {provider}" + (f" (model: {model})" if model else "") + ".",
+            )
+            result = await _send_action("configure_coding_agent", params, confirmed=True)
+            await update.message.reply_text(_format_result(result), parse_mode="HTML")
+        except Exception as exc:
+            await update.message.reply_text(f"I couldn't switch Cline provider: {exc}")
         return True
 
     if intent == "create_project":
@@ -1512,6 +1559,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /vscode <path> â€” open folder/file in VS Code on laptop\n"
         "  /check_agents â€” check codex/claude/cline CLI availability\n"
         "  /run_agent <agent> [path=<dir>] <prompt> â€” run coding agent\n"
+        "  /cline_provider <provider> [model] â€” switch Cline provider/model\n"
         "  /close_app [name]\n\n"
         "<b>Controls:</b>\n"
         "  /emergency_stop — kill everything\n"
@@ -1670,6 +1718,31 @@ async def cmd_run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Prompt: <i>{html.escape(prompt)}</i>"
         ),
     )
+
+
+async def cmd_cline_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /cline_provider <gemini|deepseek|groq|openrouter|openai|anthropic> [model]",
+        )
+        return
+    provider = context.args[0].strip().lower()
+    if provider not in {"gemini", "deepseek", "groq", "openrouter", "openai", "anthropic"}:
+        await update.message.reply_text(
+            "Provider must be one of: gemini, deepseek, groq, openrouter, openai, anthropic.",
+        )
+        return
+    model = " ".join(context.args[1:]).strip()
+    params = {"agent": "cline", "provider": provider}
+    if model:
+        params["model"] = model
+    try:
+        result = await _send_action("configure_coding_agent", params, confirmed=True)
+        await update.message.reply_text(_format_result(result), parse_mode="HTML")
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
 
 
 async def cmd_git_commit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1911,6 +1984,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("vscode", cmd_vscode))
     app.add_handler(CommandHandler("check_agents", cmd_check_agents))
     app.add_handler(CommandHandler("run_agent", cmd_run_agent))
+    app.add_handler(CommandHandler("cline_provider", cmd_cline_provider))
     app.add_handler(CommandHandler("git_commit", cmd_git_commit))
     app.add_handler(CommandHandler("install_deps", cmd_install_deps))
     app.add_handler(CommandHandler("close_app", cmd_close_app))

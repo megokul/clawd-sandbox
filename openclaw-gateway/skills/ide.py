@@ -10,6 +10,7 @@ class IDESkill(BaseSkill):
     description = "IDE integration (VS Code + local coding agent CLIs)"
     allowed_roles = ["frontend", "backend", "devops"]
     plan_auto_approved = {"open_in_vscode", "check_coding_agents", "run_coding_agent"}
+    requires_approval = {"configure_coding_agent"}
 
     def get_tools(self) -> list[dict[str, Any]]:
         return [
@@ -63,6 +64,37 @@ class IDESkill(BaseSkill):
                         },
                     },
                     "required": ["agent", "prompt"],
+                },
+            },
+            {
+                "name": "configure_coding_agent",
+                "description": (
+                    "Configure a local coding agent provider/model. "
+                    "Currently supports switching Cline provider auth."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {
+                            "type": "string",
+                            "enum": ["cline"],
+                            "description": "Coding agent to configure.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "enum": ["gemini", "deepseek", "groq", "openrouter", "openai", "anthropic"],
+                            "description": "Provider to set for Cline.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional provider model id.",
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Optional base URL (mainly for OpenAI-compatible providers).",
+                        },
+                    },
+                    "required": ["agent", "provider"],
                 },
             },
         ]

@@ -434,6 +434,69 @@ class SSHTunnelExecutor:
                     lines.append(f"{name}: unavailable (expected binary: {binary})")
             return {"returncode": 0, "stdout": "\n".join(lines), "stderr": ""}
 
+        if action == "configure_coding_agent":
+            agent = self._require_str(params, "agent").strip().lower()
+            provider = self._require_str(params, "provider").strip().lower()
+            model = str(params.get("model") or "").strip()
+            base_url = str(params.get("base_url") or "").strip()
+
+            if agent != "cline":
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Only 'cline' is supported for provider switching right now.",
+                }
+
+            api_key = str(params.get("api_key") or "").strip()
+            if not api_key:
+                api_key = self._default_api_key_for_provider(provider)
+            if not api_key:
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": (
+                        f"No API key available for provider '{provider}'. "
+                        "Pass api_key explicitly or configure matching environment key."
+                    ),
+                }
+
+            if not model:
+                model = self._default_model_for_provider(provider)
+
+            binary = self._coding_bins.get("cline", "cline")
+            if self.remote_os == "windows":
+                binary, available = self._resolve_windows_binary(client, binary)
+                if not available:
+                    return {
+                        "returncode": 1,
+                        "stdout": "",
+                        "stderr": "Cline CLI is not installed or not on PATH.",
+                    }
+
+            args = [binary, "auth", "-p", provider, "-k", api_key]
+            if model:
+                args.extend(["-m", model])
+            if base_url:
+                args.extend(["-b", base_url])
+
+            configured = self._run_command(client, args, cwd=None, timeout=120)
+            if configured["returncode"] != 0:
+                return configured
+
+            verify = self._run_command(client, [binary, "--version"], cwd=None, timeout=30)
+            if verify["returncode"] == 0:
+                configured["stdout"] = (
+                    f"Cline configured to provider '{provider}'"
+                    + (f" (model: {model})" if model else "")
+                )
+            else:
+                configured["stdout"] = (
+                    f"Cline auth command succeeded for provider '{provider}'"
+                    + (f" (model: {model})" if model else "")
+                )
+            configured["stderr"] = ""
+            return configured
+
         if action == "run_coding_agent":
             agent = self._require_str(params, "agent").strip().lower()
             prompt = self._require_str(params, "prompt")
@@ -483,6 +546,30 @@ class SSHTunnelExecutor:
             return {"returncode": 1, "stdout": "", "stderr": "close_app currently supports Windows remote hosts only."}
 
         return {"returncode": 1, "stdout": "", "stderr": f"Action '{action}' is not supported in SSH tunnel mode."}
+
+    @staticmethod
+    def _default_api_key_for_provider(provider: str) -> str:
+        keys = {
+            "gemini": bot_cfg.GOOGLE_AI_API_KEY,
+            "deepseek": bot_cfg.DEEPSEEK_API_KEY,
+            "groq": bot_cfg.GROQ_API_KEY,
+            "openrouter": bot_cfg.OPENROUTER_API_KEY,
+            "openai": bot_cfg.OPENAI_API_KEY,
+            "anthropic": bot_cfg.ANTHROPIC_API_KEY,
+        }
+        return str(keys.get(provider, "") or "").strip()
+
+    @staticmethod
+    def _default_model_for_provider(provider: str) -> str:
+        defaults = {
+            "gemini": bot_cfg.GEMINI_MODEL or "gemini-2.0-flash",
+            "deepseek": "deepseek-chat",
+            "groq": "llama-3.3-70b-versatile",
+            "openrouter": bot_cfg.OPENROUTER_MODEL or "qwen/qwen3-next-80b-a3b-instruct:free",
+            "openai": "gpt-4o-mini",
+            "anthropic": "claude-sonnet-4-5",
+        }
+        return str(defaults.get(provider, "") or "").strip()
 
     def _resolve_windows_binary(self, client: paramiko.SSHClient, binary: str) -> tuple[str, bool]:
         b = (binary or "").strip()

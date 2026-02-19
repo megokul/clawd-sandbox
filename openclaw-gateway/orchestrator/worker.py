@@ -34,7 +34,7 @@ PLAN_AUTO_APPROVED = {
 }
 
 # Actions that always need individual Telegram approval.
-ALWAYS_CONFIRM = {"git_push", "gh_create_repo"}
+ALWAYS_CONFIRM = {"git_push", "gh_create_repo", "configure_coding_agent"}
 
 MAX_TOOL_ROUNDS = 30
 

@@ -24,6 +24,7 @@ KNOWN_ACTIONS: set[str] = {
     # ADMIN
     "git_push", "gh_create_repo", "docker_compose_up",
     "close_app", "zip_project", "open_in_vscode",
+    "check_coding_agents", "run_coding_agent", "configure_coding_agent",
 }
 
 # Action → minimum risk level required.
@@ -50,6 +51,9 @@ ACTION_RISK: dict[str, str] = {
     "close_app": "ADMIN",
     "zip_project": "WRITE",
     "open_in_vscode": "WRITE",
+    "check_coding_agents": "READ_ONLY",
+    "run_coding_agent": "WRITE",
+    "configure_coding_agent": "ADMIN",
 }
 
 # Required parameters per action.
@@ -74,6 +78,9 @@ ACTION_REQUIRED_PARAMS: dict[str, list[str]] = {
     "close_app": ["app"],
     "zip_project": ["working_dir"],
     "open_in_vscode": ["path"],
+    "check_coding_agents": [],
+    "run_coding_agent": ["agent", "prompt"],
+    "configure_coding_agent": ["agent", "provider"],
     "ollama_chat": ["messages"],
     "web_search": ["query"],
 }

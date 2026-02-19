@@ -296,6 +296,37 @@ CODING_TOOLS: list[dict] = [
             "required": ["agent", "prompt"],
         },
     },
+    {
+        "name": "configure_coding_agent",
+        "description": (
+            "Configure local coding agent provider/model. "
+            "Currently supports switching Cline provider authentication."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "enum": ["cline"],
+                    "description": "Coding agent to configure.",
+                },
+                "provider": {
+                    "type": "string",
+                    "enum": ["gemini", "deepseek", "groq", "openrouter", "openai", "anthropic"],
+                    "description": "Provider to set for Cline.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model id for that provider.",
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "Optional custom base URL.",
+                },
+            },
+            "required": ["agent", "provider"],
+        },
+    },
 ]
 
 # Subset for the planning phase (read-only + search).

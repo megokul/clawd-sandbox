@@ -35,12 +35,15 @@ ACTION_RISK: dict[str, str] = {
     "docker_build": "WRITE",
     "zip_project": "WRITE",
     "open_in_vscode": "WRITE",
+    "check_coding_agents": "READ_ONLY",
+    "run_coding_agent": "WRITE",
 
     # ADMIN — external-facing or destructive
     "git_push": "ADMIN",
     "gh_create_repo": "ADMIN",
     "docker_compose_up": "ADMIN",
     "close_app": "ADMIN",
+    "configure_coding_agent": "ADMIN",
 }
 
 # Actions that are always blocked, regardless of approval.
