@@ -255,6 +255,47 @@ CODING_TOOLS: list[dict] = [
             "required": ["path"],
         },
     },
+    {
+        "name": "check_coding_agents",
+        "description": (
+            "Check if local coding agent CLIs are installed on the laptop. "
+            "Reports Codex, Claude, and Cline availability."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "run_coding_agent",
+        "description": (
+            "Run a local coding agent CLI in non-interactive mode on the laptop "
+            "(Codex, Claude, or Cline)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "enum": ["codex", "claude", "cline"],
+                    "description": "Which coding agent to run.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Task prompt to send to the coding agent.",
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Optional project directory on the laptop.",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Optional timeout (30-3600, default 1800).",
+                },
+            },
+            "required": ["agent", "prompt"],
+        },
+    },
 ]
 
 # Subset for the planning phase (read-only + search).

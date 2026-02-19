@@ -59,6 +59,7 @@ _CHAT_SYSTEM_PROMPT = (
     "You are OpenClaw running through Telegram. "
     "Converse naturally in plain language and extract key details from user text. "
     "Use available tools/skills whenever execution, inspection, git, build, docker, or web research is needed. "
+    "When asked to use coding agents, use check_coding_agents and run_coding_agent tools (codex/claude/cline CLIs). "
     "Ask concise clarifying questions only when required details are missing. "
     "Do not output JSON unless the user explicitly asks for JSON."
 )
@@ -246,6 +247,16 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
         f"Working directory: {project_path}\n"
         "If you perform filesystem/git/build actions, prefer this context unless the user specifies another path."
     )
+    try:
+        prompt_context = _skill_registry.get_prompt_skill_context(text, role="chat")
+        if prompt_context:
+            system_prompt += (
+                "\n\n[External Skill Guidance]\n"
+                "Use the following skill guidance if it helps solve the request:\n\n"
+                f"{prompt_context}"
+            )
+    except Exception:
+        logger.exception("Failed to inject external skill guidance into Telegram chat")
 
     rounds = 0
     final_text = ""
@@ -333,11 +344,24 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
         return
 
     history = _chat_history[-(_CHAT_HISTORY_MAX * 2):]
+    system_prompt = _CHAT_SYSTEM_PROMPT
+    if _skill_registry:
+        try:
+            prompt_context = _skill_registry.get_prompt_skill_context(text, role="chat")
+            if prompt_context:
+                system_prompt += (
+                    "\n\n[External Skill Guidance]\n"
+                    "Use the following skill guidance if relevant:\n\n"
+                    f"{prompt_context}"
+                )
+        except Exception:
+            logger.exception("Failed to inject external skill guidance into fallback chat")
+
     messages = [*history, {"role": "user", "content": text}]
     try:
         response = await _provider_router.chat(
             messages,
-            system=_CHAT_SYSTEM_PROMPT,
+            system=system_prompt,
             max_tokens=700,
             task_type="general",
             preferred_provider="gemini",
@@ -1359,12 +1383,31 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _authorised(update):
         return
     try:
-        from skills.registry import build_default_registry
-        registry = build_default_registry()
+        if not _skill_registry:
+            await update.message.reply_text("Skill registry is not configured.")
+            return
+        rows = _skill_registry.list_skills()
+        if not rows:
+            await update.message.reply_text("No skills are currently loaded.")
+            return
+
         lines = ["<b>SKYNET Skills:</b>\n"]
-        for name, skill in sorted(registry._skills.items()):
-            roles = ", ".join(skill.allowed_roles) if skill.allowed_roles else "all"
-            lines.append(f"  <b>{html.escape(name)}</b> — {html.escape(skill.description)}\n    Roles: {roles}")
+        for row in sorted(rows, key=lambda r: (r.get("kind", "tool"), r["name"])):
+            kind = row.get("kind", "tool")
+            roles = ", ".join(row.get("allowed_roles", ["all"]))
+            description = row.get("description", "")
+            if kind == "prompt":
+                src = row.get("source", "")
+                lines.append(
+                    f"  <b>{html.escape(row['name'])}</b> - {html.escape(description)}\n"
+                    f"    Kind: prompt-only | Roles: {html.escape(roles)}\n"
+                    f"    Source: <code>{html.escape(src)}</code>"
+                )
+            else:
+                lines.append(
+                    f"  <b>{html.escape(row['name'])}</b> - {html.escape(description)}\n"
+                    f"    Kind: tools | Roles: {html.escape(roles)}"
+                )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
@@ -1445,3 +1488,4 @@ def build_app() -> Application:
 
     _bot_app = app
     return app
+

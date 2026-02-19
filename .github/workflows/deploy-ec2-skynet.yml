@@ -31,6 +31,8 @@ jobs:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SKYNET_EXTERNAL_SKILL_URLS: ${{ secrets.SKYNET_EXTERNAL_SKILL_URLS }}
+      SKYNET_EXTERNAL_SKILLS_DIR: ${{ secrets.SKYNET_EXTERNAL_SKILLS_DIR }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,6 +89,8 @@ jobs:
             printf 'DEEPSEEK_API_KEY=%s\n' "${DEEPSEEK_API_KEY}"
             printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY}"
             printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY}"
+            printf 'SKYNET_EXTERNAL_SKILL_URLS=%s\n' "${SKYNET_EXTERNAL_SKILL_URLS}"
+            printf 'SKYNET_EXTERNAL_SKILLS_DIR=%s\n' "${SKYNET_EXTERNAL_SKILLS_DIR}"
           } > .env.ci
           chmod 600 .env.ci
 

@@ -84,6 +84,19 @@ class SpecializedAgent:
             current_task=f"{task['title']}\n{task.get('description', '')}",
             project_path=project["local_path"],
         )
+        try:
+            prompt_context = self.skill_registry.get_prompt_skill_context(
+                f"{task.get('title', '')}\n{task.get('description', '')}",
+                role=self.role,
+            )
+            if prompt_context:
+                system_prompt += (
+                    "\n\n[External Skill Guidance]\n"
+                    "Use this community skill guidance if relevant:\n\n"
+                    f"{prompt_context}"
+                )
+        except Exception:
+            logger.exception("Failed to inject external skill guidance for role=%s", self.role)
 
         # Get tools filtered for this agent's role.
         tools = self.skill_registry.get_tools_for_role(self.role)

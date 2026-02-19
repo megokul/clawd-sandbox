@@ -29,7 +29,7 @@ PLAN_AUTO_APPROVED = {
     "file_write", "file_read", "list_directory", "create_directory",
     "git_init", "git_status", "git_add_all", "git_commit",
     "run_tests", "lint_project", "build_project", "install_dependencies",
-    "open_in_vscode",
+    "open_in_vscode", "check_coding_agents", "run_coding_agent",
 }
 
 # Actions that always need individual Telegram approval.

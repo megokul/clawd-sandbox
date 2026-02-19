@@ -57,6 +57,7 @@ AUTO_ACTIONS: set[str] = {
     "file_read",
     "list_directory",
     "ollama_chat",
+    "check_coding_agents",
 }
 
 CONFIRM_ACTIONS: set[str] = {
@@ -69,6 +70,7 @@ CONFIRM_ACTIONS: set[str] = {
     "git_push",
     "gh_create_repo",
     "open_in_vscode",
+    "run_coding_agent",
     "docker_build",
     "docker_compose_up",
     "close_app",

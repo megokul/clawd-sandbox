@@ -88,3 +88,23 @@ S3_PREFIX: str = os.environ.get(
     "SKYNET_S3_PREFIX", os.environ.get("OPENCLAW_S3_PREFIX", "openclaw/"),
 )
 AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
+
+# ---------------------------------------------------------------------------
+# External SKILL.md packs (OpenClaw community skills)
+# ---------------------------------------------------------------------------
+EXTERNAL_SKILLS_DIR: str = os.environ.get(
+    "SKYNET_EXTERNAL_SKILLS_DIR",
+    os.environ.get(
+        "OPENCLAW_EXTERNAL_SKILLS_DIR",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "external-skills"),
+    ),
+)
+_raw_external_skill_urls = os.environ.get(
+    "SKYNET_EXTERNAL_SKILL_URLS",
+    os.environ.get("OPENCLAW_EXTERNAL_SKILL_URLS", ""),
+)
+EXTERNAL_SKILL_URLS: list[str] = [
+    u.strip()
+    for u in _raw_external_skill_urls.replace("\n", ",").split(",")
+    if u.strip()
+]

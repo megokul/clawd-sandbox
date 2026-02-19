@@ -60,3 +60,18 @@ make manual-check-api
 make manual-check-e2e
 make manual-check-delegate
 ```
+
+## External OpenClaw Skills (SKILL.md)
+
+The gateway can load community OpenClaw `SKILL.md` files as prompt guidance.
+
+- Local directory (recursive): `SKYNET_EXTERNAL_SKILLS_DIR`
+- Optional remote URLs (comma-separated): `SKYNET_EXTERNAL_SKILL_URLS`
+
+Example:
+
+```bash
+export SKYNET_EXTERNAL_SKILL_URLS="https://github.com/openclaw/skills/tree/main/skills/steipete/coding-agent/SKILL.md"
+```
+
+This is a prompt-level integration only. Execution remains constrained to built-in allowlisted tools/actions.

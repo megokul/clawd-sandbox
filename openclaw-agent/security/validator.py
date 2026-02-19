@@ -49,8 +49,16 @@ _SHELL_META = re.compile(r"[;&|`$(){}!<>\"\']")
 # "content" carries source code, which naturally contains quotes, braces, etc.
 # "description" carries repo descriptions which may contain special chars.
 # "message" carries commit messages which may contain quotes.
-# "messages", "system", "tools" carry AI prompts for ollama_chat — never shell-interpolated.
-_SANITISE_EXEMPT_KEYS: set[str] = {"content", "description", "message", "messages", "system", "tools"}
+# "messages", "system", "tools", "prompt" carry AI prompts — never shell-interpolated.
+_SANITISE_EXEMPT_KEYS: set[str] = {
+    "content",
+    "description",
+    "message",
+    "messages",
+    "system",
+    "tools",
+    "prompt",
+}
 
 
 # ------------------------------------------------------------------

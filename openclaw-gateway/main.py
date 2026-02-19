@@ -134,8 +134,15 @@ async def _main() -> None:
     # ---- SKYNET Skill Registry ----
     from skills.registry import build_default_registry
 
-    skill_registry = build_default_registry()
-    logger.info("Skill registry loaded (%d skills).", len(skill_registry._skills))
+    skill_registry = build_default_registry(
+        external_skills_dir=bot_config.EXTERNAL_SKILLS_DIR,
+        external_skill_urls=bot_config.EXTERNAL_SKILL_URLS,
+    )
+    logger.info(
+        "Skill registry loaded (%d total; %d prompt-only).",
+        skill_registry.skill_count,
+        skill_registry.prompt_skill_count,
+    )
 
     # ---- SKYNET Memory Manager ----
     from memory.manager import MemoryManager

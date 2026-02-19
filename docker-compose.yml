@@ -49,10 +49,13 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SKYNET_EXTERNAL_SKILLS_DIR=${SKYNET_EXTERNAL_SKILLS_DIR:-/app/external-skills}
+      - SKYNET_EXTERNAL_SKILL_URLS=${SKYNET_EXTERNAL_SKILL_URLS:-}
       - DISABLE_TELEGRAM_BOT=${DISABLE_TELEGRAM_BOT:-0}
       - OPENCLAW_LOG_LEVEL=${OPENCLAW_LOG_LEVEL:-INFO}
     volumes:
       - openclaw-data:/app/data
+      - ./openclaw-gateway/external-skills:/app/external-skills
     depends_on:
       skynet-api:
         condition: service_healthy

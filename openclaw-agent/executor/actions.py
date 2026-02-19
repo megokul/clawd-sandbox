@@ -19,12 +19,26 @@ import asyncio
 import os
 import re
 import logging
+import shutil
 from typing import Any
 
 logger = logging.getLogger("chathan.executor")
 
 # Upper bound on how long any single subprocess may run (seconds).
 _SUBPROCESS_TIMEOUT = 120
+
+# CLI resolution for local coding agents.
+_CODING_AGENT_BINARIES: dict[str, str] = {
+    "codex": os.environ.get("SKYNET_CODEX_BIN") or os.environ.get("OPENCLAW_CODEX_BIN") or "codex",
+    "claude": os.environ.get("SKYNET_CLAUDE_BIN") or os.environ.get("OPENCLAW_CLAUDE_BIN") or "claude",
+    "cline": os.environ.get("SKYNET_CLINE_BIN") or os.environ.get("OPENCLAW_CLINE_BIN") or "cline",
+}
+_CODING_AGENT_PREFIX_ARGS: dict[str, list[str]] = {
+    "codex": ["exec"],
+    "claude": ["-p"],
+    "cline": ["-p"],
+}
+_CODING_AGENT_TIMEOUT_SECONDS = 1800
 
 
 # ------------------------------------------------------------------
@@ -352,6 +366,68 @@ async def open_in_vscode(params: dict[str, Any]) -> dict[str, Any]:
     return await _run(["code", path])
 
 
+async def check_coding_agents(params: dict[str, Any]) -> dict[str, Any]:
+    """Detect available coding agent CLIs on the laptop."""
+    del params
+    lines = []
+    for name, binary in _CODING_AGENT_BINARIES.items():
+        resolved = shutil.which(binary)
+        if resolved:
+            lines.append(f"{name}: available ({resolved})")
+        else:
+            lines.append(f"{name}: unavailable (expected binary: {binary})")
+    return {
+        "returncode": 0,
+        "stdout": "\n".join(lines),
+        "stderr": "",
+    }
+
+
+def _resolve_coding_binary(name: str) -> tuple[str, str]:
+    """Resolve configured binary path for a coding agent."""
+    binary = _CODING_AGENT_BINARIES[name]
+    if os.path.isabs(binary):
+        if os.path.exists(binary):
+            return binary, binary
+        return "", binary
+    resolved = shutil.which(binary)
+    return (resolved or "", binary)
+
+
+async def run_coding_agent(params: dict[str, Any]) -> dict[str, Any]:
+    """
+    Run a local coding agent CLI in non-interactive mode.
+
+    Supported agents: codex, claude, cline.
+    """
+    agent = _require_param(params, "agent").strip().lower()
+    prompt = _require_param(params, "prompt")
+    cwd = params.get("working_dir")
+    timeout = params.get("timeout_seconds", _CODING_AGENT_TIMEOUT_SECONDS)
+
+    if agent not in _CODING_AGENT_BINARIES:
+        allowed = ", ".join(sorted(_CODING_AGENT_BINARIES.keys()))
+        return {"returncode": 1, "stdout": "", "stderr": f"Unknown coding agent '{agent}'. Allowed: {allowed}"}
+    if cwd is not None and not isinstance(cwd, str):
+        return {"returncode": 1, "stdout": "", "stderr": "working_dir must be a string path."}
+    if not isinstance(timeout, int) or timeout < 30 or timeout > 3600:
+        return {"returncode": 1, "stdout": "", "stderr": "timeout_seconds must be an integer between 30 and 3600."}
+
+    resolved, configured = _resolve_coding_binary(agent)
+    if not resolved:
+        return {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": (
+                f"{agent} CLI not found (configured '{configured}'). "
+                f"Set SKYNET_{agent.upper()}_BIN or OPENCLAW_{agent.upper()}_BIN to the executable path."
+            ),
+        }
+
+    args = [resolved, *_CODING_AGENT_PREFIX_ARGS[agent], prompt]
+    return await _run(args, cwd=cwd, timeout=timeout)
+
+
 async def docker_build(params: dict[str, Any]) -> dict[str, Any]:
     """Build a Docker image from the project directory."""
     cwd = _require_param(params, "working_dir")
@@ -469,6 +545,7 @@ ACTION_REGISTRY: dict[str, Any] = {
     "file_read": file_read,
     "list_directory": list_directory,
     "ollama_chat": ollama_chat,
+    "check_coding_agents": check_coding_agents,
     # CONFIRM
     "git_commit": git_commit,
     "install_dependencies": install_dependencies,
@@ -479,6 +556,7 @@ ACTION_REGISTRY: dict[str, Any] = {
     "git_push": git_push,
     "gh_create_repo": gh_create_repo,
     "open_in_vscode": open_in_vscode,
+    "run_coding_agent": run_coding_agent,
     "docker_build": docker_build,
     "docker_compose_up": docker_compose_up,
     "close_app": close_app,
