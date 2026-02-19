@@ -25,6 +25,7 @@ jobs:
       SKYNET_AUTH_TOKEN: ${{ secrets.SKYNET_AUTH_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
+      GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,6 +58,7 @@ jobs:
             : "${SKYNET_AUTH_TOKEN:?Missing SKYNET_AUTH_TOKEN secret}"
             : "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN secret}"
             : "${TELEGRAM_ALLOWED_USER_ID:?Missing TELEGRAM_ALLOWED_USER_ID secret}"
+            : "${GOOGLE_AI_API_KEY:?Missing GOOGLE_AI_API_KEY secret}"
           fi
 
       - name: Build deployment env file
@@ -70,6 +72,7 @@ jobs:
             printf 'SKYNET_AUTH_TOKEN=%s\n' "${SKYNET_AUTH_TOKEN}"
             printf 'TELEGRAM_BOT_TOKEN=%s\n' "${TELEGRAM_BOT_TOKEN}"
             printf 'TELEGRAM_ALLOWED_USER_ID=%s\n' "${TELEGRAM_ALLOWED_USER_ID}"
+            printf 'GOOGLE_AI_API_KEY=%s\n' "${GOOGLE_AI_API_KEY}"
           } > .env.ci
           chmod 600 .env.ci
 

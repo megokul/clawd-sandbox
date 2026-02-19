@@ -243,6 +243,8 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
                 max_tokens=1500,
                 require_tools=True,
                 task_type="general",
+                preferred_provider="gemini",
+                preferred_provider_only=True,
             )
             messages.append({"role": "assistant", "content": _build_assistant_content(response)})
 
@@ -288,6 +290,8 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
                 system=system_prompt,
                 max_tokens=700,
                 task_type="general",
+                preferred_provider="gemini",
+                preferred_provider_only=True,
             )
             final_text = (summary.text or "").strip()
         except Exception:
@@ -321,6 +325,8 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
             system=_CHAT_SYSTEM_PROMPT,
             max_tokens=700,
             task_type="general",
+            preferred_provider="gemini",
+            preferred_provider_only=True,
         )
     except Exception as exc:
         await update.message.reply_text(f"AI unavailable: {exc}")

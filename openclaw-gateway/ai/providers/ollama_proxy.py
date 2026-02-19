@@ -32,12 +32,8 @@ class OllamaProxyProvider(BaseProvider):
     rpm_limit = None           # Limited only by GPU speed.
 
     def __init__(self, model: str = "qwen2.5-coder:7b"):
-        # Skip BaseProvider.__init__ since we don't need an API key.
-        self.api_key = ""
-        self.model_name = model
-        self._daily_used = 0
-        self._daily_date = ""
-        self._rpm_timestamps: list[float] = []
+        # Still initialize BaseProvider internals (cooldown/error tracking).
+        super().__init__(api_key="", model=model)
 
     @property
     def default_model(self) -> str:
