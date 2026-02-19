@@ -16,10 +16,12 @@ SECURITY INVARIANTS
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import logging
 import shutil
+from urllib import parse, request
 from typing import Any
 
 logger = logging.getLogger("chathan.executor")
@@ -39,6 +41,8 @@ _CODING_AGENT_PREFIX_ARGS: dict[str, list[str]] = {
     "cline": ["-p"],
 }
 _CODING_AGENT_TIMEOUT_SECONDS = 1800
+_BRAVE_SEARCH_API_KEY = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+_WEB_SEARCH_TIMEOUT_SECONDS = 15
 
 
 # ------------------------------------------------------------------
@@ -215,6 +219,93 @@ async def list_directory(params: dict[str, Any]) -> dict[str, Any]:
         return {"returncode": 0, "stdout": listing, "stderr": ""}
     except OSError as exc:
         return {"returncode": 1, "stdout": "", "stderr": str(exc)}
+
+
+async def web_search(params: dict[str, Any]) -> dict[str, Any]:
+    """Search the web from the laptop worker (Brave API with DDG fallback)."""
+    query = _require_param(params, "query")
+    raw_num = params.get("num_results", 5)
+    try:
+        num_results = int(raw_num)
+    except (TypeError, ValueError):
+        num_results = 5
+    num_results = min(max(num_results, 1), 10)
+
+    loop = asyncio.get_running_loop()
+    if _BRAVE_SEARCH_API_KEY:
+        try:
+            output = await loop.run_in_executor(
+                None, _brave_web_search_sync, query, num_results, _BRAVE_SEARCH_API_KEY,
+            )
+            return {"returncode": 0, "stdout": output, "stderr": ""}
+        except Exception as exc:
+            logger.warning("Brave web search failed: %s; falling back to DDG", exc)
+
+    try:
+        output = await loop.run_in_executor(None, _ddg_web_search_sync, query, num_results)
+        return {"returncode": 0, "stdout": output, "stderr": ""}
+    except Exception as exc:
+        return {"returncode": 1, "stdout": "", "stderr": f"Web search failed: {exc}"}
+
+
+def _brave_web_search_sync(query: str, num_results: int, api_key: str) -> str:
+    url = (
+        "https://api.search.brave.com/res/v1/web/search?"
+        f"q={parse.quote_plus(query)}&count={num_results}"
+    )
+    req = request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key,
+            "User-Agent": "SKYNET-Worker/1.0",
+        },
+    )
+    with request.urlopen(req, timeout=_WEB_SEARCH_TIMEOUT_SECONDS) as resp:
+        payload = resp.read().decode("utf-8", errors="replace")
+    data = json.loads(payload)
+    results = data.get("web", {}).get("results", []) if isinstance(data, dict) else []
+    if not results:
+        return "No results found."
+
+    lines: list[str] = []
+    for i, item in enumerate(results[:num_results], 1):
+        title = str(item.get("title", "No title")).strip()
+        link = str(item.get("url", "")).strip()
+        desc = str(item.get("description", "No description")).strip()
+        lines.append(f"{i}. {title}\n   URL: {link}\n   {desc}\n")
+    return "\n".join(lines)
+
+
+def _ddg_web_search_sync(query: str, num_results: int) -> str:
+    url = f"https://lite.duckduckgo.com/lite/?q={parse.quote_plus(query)}"
+    req = request.Request(url, headers={"User-Agent": "SKYNET-Worker/1.0"})
+    with request.urlopen(req, timeout=_WEB_SEARCH_TIMEOUT_SECONDS) as resp:
+        page = resp.read().decode("utf-8", errors="replace")
+
+    results: list[str] = []
+    links = re.findall(
+        r'class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        page,
+        re.DOTALL,
+    )
+    for link, title in links[:num_results]:
+        title_text = re.sub(r"<[^>]+>", "", title).strip()
+        results.append(f"- {title_text}\n  URL: {link}")
+
+    if results:
+        return "\n".join(results)
+
+    links = re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>([^<]+)</a>', page)
+    for link, title in links:
+        if "duckduckgo.com" in link:
+            continue
+        results.append(f"- {title.strip()}\n  URL: {link}")
+        if len(results) >= num_results:
+            break
+
+    return "\n".join(results) if results else "No results found."
 
 
 def _list_dir_sync(directory: str, recursive: bool, depth: int) -> str:
@@ -538,6 +629,7 @@ from executor.ollama import ollama_chat
 ACTION_REGISTRY: dict[str, Any] = {
     # AUTO
     "git_status": git_status,
+    "web_search": web_search,
     "run_tests": run_tests,
     "lint_project": lint_project,
     "start_dev_server": start_dev_server,

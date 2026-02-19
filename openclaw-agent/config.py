@@ -50,6 +50,7 @@ class Tier(str, Enum):
 # ---------------------------------------------------------------------------
 AUTO_ACTIONS: set[str] = {
     "git_status",
+    "web_search",
     "run_tests",
     "lint_project",
     "start_dev_server",

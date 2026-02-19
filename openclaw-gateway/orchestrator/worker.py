@@ -29,6 +29,7 @@ PLAN_AUTO_APPROVED = {
     "file_write", "file_read", "list_directory", "create_directory",
     "git_init", "git_status", "git_add_all", "git_commit",
     "run_tests", "lint_project", "build_project", "install_dependencies",
+    "web_search",
     "open_in_vscode", "check_coding_agents", "run_coding_agent",
 }
 
@@ -427,13 +428,6 @@ class Worker:
 
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a single tool call."""
-        # Web search is handled locally on EC2.
-        if tool_name == "web_search":
-            return await self.searcher.search(
-                tool_input.get("query", ""),
-                tool_input.get("num_results", 5),
-            )
-
         # Determine if this action needs individual approval.
         if tool_name in ALWAYS_CONFIRM:
             approved = await self.request_approval(

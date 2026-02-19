@@ -356,10 +356,15 @@ class ProjectManager:
             tool_results = []
             for tc in response.tool_calls:
                 if tc.name == "web_search":
-                    result = await self.searcher.search(
-                        tc.input.get("query", ""),
-                        tc.input.get("num_results", 5),
+                    ok, output = await self._run_agent_action(
+                        "web_search",
+                        {
+                            "query": tc.input.get("query", ""),
+                            "num_results": tc.input.get("num_results", 5),
+                        },
+                        confirmed=True,
                     )
+                    result = output if ok else f"Web search unavailable: {output}"
                 else:
                     result = f"Tool '{tc.name}' not available during planning."
                 tool_results.append({

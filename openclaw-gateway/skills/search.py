@@ -1,4 +1,4 @@
-"""SKYNET — Search Skill (web_search — handled locally on EC2)."""
+"""SKYNET — Search Skill (web_search — executed by the laptop worker agent)."""
 
 from __future__ import annotations
 from typing import Any
@@ -33,9 +33,9 @@ class SearchSkill(BaseSkill):
         ]
 
     async def execute(self, tool_name: str, tool_input: dict[str, Any], context: SkillContext) -> str:
-        if tool_name == "web_search" and context.searcher:
-            return await context.searcher.search(
-                tool_input.get("query", ""),
-                tool_input.get("num_results", 5),
-            )
-        return "Web search is not available."
+        if tool_name != "web_search":
+            return f"Unknown search tool: {tool_name}"
+        return await context.send_to_agent("web_search", {
+            "query": tool_input.get("query", ""),
+            "num_results": tool_input.get("num_results", 5),
+        }, confirmed=True)

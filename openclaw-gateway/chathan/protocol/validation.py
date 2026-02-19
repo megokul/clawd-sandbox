@@ -16,7 +16,7 @@ from .execution_spec import ExecutionSpec, ExecutionStep
 # Actions recognized by the CHATHAN Worker.
 KNOWN_ACTIONS: set[str] = {
     # READ_ONLY
-    "file_read", "list_directory", "git_status", "ollama_chat",
+    "file_read", "list_directory", "git_status", "ollama_chat", "web_search",
     # WRITE
     "file_write", "create_directory", "git_commit", "git_init",
     "git_add_all", "install_dependencies", "run_tests", "lint_project",
@@ -32,6 +32,7 @@ ACTION_RISK: dict[str, str] = {
     "list_directory": "READ_ONLY",
     "git_status": "READ_ONLY",
     "ollama_chat": "READ_ONLY",
+    "web_search": "READ_ONLY",
     "run_tests": "READ_ONLY",
     "lint_project": "READ_ONLY",
     "start_dev_server": "READ_ONLY",
@@ -74,6 +75,7 @@ ACTION_REQUIRED_PARAMS: dict[str, list[str]] = {
     "zip_project": ["working_dir"],
     "open_in_vscode": ["path"],
     "ollama_chat": ["messages"],
+    "web_search": ["query"],
 }
 
 _RISK_ORDER = {"READ_ONLY": 0, "WRITE": 1, "ADMIN": 2}

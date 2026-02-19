@@ -54,6 +54,7 @@ _SANITISE_EXEMPT_KEYS: set[str] = {
     "content",
     "description",
     "message",
+    "query",
     "messages",
     "system",
     "tools",
