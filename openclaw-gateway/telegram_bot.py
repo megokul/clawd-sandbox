@@ -58,8 +58,7 @@ _CHAT_HISTORY_MAX: int = 12
 _CHAT_SYSTEM_PROMPT = (
     "You are OpenClaw running through Telegram. "
     "Converse naturally in plain language and extract key details from user text. "
-    "For greetings/small talk, reply warmly in one short sentence. "
-    "Never be dismissive, sarcastic, or mention that the user already greeted. "
+    "Never be dismissive or sarcastic. "
     "Use available tools/skills whenever execution, inspection, git, build, docker, or web research is needed. "
     "When asked to use coding agents, use check_coding_agents and run_coding_agent tools (codex/claude/cline CLIs). "
     "Ask concise clarifying questions only when required details are missing. "
@@ -207,12 +206,6 @@ def _build_assistant_content(response) -> object:
             "input": tc.input,
         })
     return parts if parts else response.text
-
-
-def _is_small_talk(text: str) -> bool:
-    """Detect simple greetings/thanks that should get a short warm reply."""
-    lowered = (text or "").strip().lower()
-    return bool(re.fullmatch(r"(hi|hello|hey|yo|sup|thanks|thank you|good morning|good evening)[.!? ]*", lowered))
 
 
 def _friendly_ai_error(exc: Exception) -> str:
@@ -395,42 +388,6 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
     _chat_history.append({"role": "assistant", "content": reply})
     _trim_chat_history()
     await update.message.reply_text(reply)
-
-
-async def _reply_small_talk(update: Update, text: str) -> bool:
-    """
-    Handle basic greetings with fresh context to avoid stale/rigid replies.
-
-    Returns True when handled.
-    """
-    if not _is_small_talk(text):
-        return False
-
-    if not _provider_router:
-        await update.message.reply_text("Hey! How can I help?")
-        return True
-
-    try:
-        response = await _provider_router.chat(
-            [{"role": "user", "content": text}],
-            system=(
-                "You are chatting on Telegram. Reply naturally and warmly in one short sentence. "
-                "Do not mention repeated greetings, prior turns, or process details."
-            ),
-            max_tokens=80,
-            task_type="general",
-            preferred_provider="gemini",
-            allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
-        )
-        reply = (response.text or "").strip() or "Hey! How can I help?"
-    except Exception:
-        reply = "Hey! How can I help?"
-
-    await update.message.reply_text(reply)
-    _chat_history.append({"role": "user", "content": text})
-    _chat_history.append({"role": "assistant", "content": reply})
-    _trim_chat_history()
-    return True
 
 
 async def _capture_idea(update: Update, text: str) -> None:
@@ -1486,9 +1443,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("Usage: idea: <text>")
             return
         await _capture_idea(update, idea_text)
-        return
-
-    if await _reply_small_talk(update, text):
         return
 
     if await _handle_natural_action(update, text):
