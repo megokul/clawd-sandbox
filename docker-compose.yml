@@ -70,6 +70,7 @@ services:
       - OPENCLAW_SSH_USER=${OPENCLAW_SSH_USER:-}
       - OPENCLAW_SSH_PASSWORD=${OPENCLAW_SSH_PASSWORD:-}
       - OPENCLAW_SSH_KEY_PATH=${OPENCLAW_SSH_KEY_PATH:-}
+      - OPENCLAW_SSH_KEY_FILE=${OPENCLAW_SSH_KEY_FILE:-/dev/null}
       - OPENCLAW_SSH_CONNECT_TIMEOUT=${OPENCLAW_SSH_CONNECT_TIMEOUT:-4}
       - OPENCLAW_SSH_COMMAND_TIMEOUT=${OPENCLAW_SSH_COMMAND_TIMEOUT:-180}
       - OPENCLAW_SSH_HEALTH_CACHE_SECONDS=${OPENCLAW_SSH_HEALTH_CACHE_SECONDS:-15}
@@ -84,6 +85,7 @@ services:
     volumes:
       - openclaw-data:/app/data
       - ./openclaw-gateway/external-skills:/app/external-skills
+      - ${OPENCLAW_SSH_KEY_FILE:-/dev/null}:${OPENCLAW_SSH_KEY_PATH:-/app/keys/laptop_ed25519}:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

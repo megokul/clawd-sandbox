@@ -147,6 +147,13 @@ Set these env vars for the gateway:
 - `OPENCLAW_SSH_REMOTE_OS=windows`
 - `OPENCLAW_SSH_ALLOWED_ROOTS=E:\MyProjects`
 
+For CI/CD deployments, prefer key auth with GitHub Secrets:
+
+- `OPENCLAW_SSH_PRIVATE_KEY_B64` = base64 of the private key content
+- `OPENCLAW_SSH_KEY_PATH=/app/keys/laptop_ed25519`
+
+The workflow will decode the key on the runner and mount it into the gateway container automatically.
+
 Recommended reverse tunnel from laptop to EC2:
 
 ```powershell

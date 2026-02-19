@@ -6,9 +6,6 @@ services:
     ports:
       - "8765:8765"   # WebSocket (agent connection)
       - "8766:8766"   # HTTP API (for external SKYNET if needed)
-    volumes:
-      - gateway-data:/app/data
-      - ${OPENCLAW_TLS_CERT_DIR:-./certs}:/app/certs:ro
     environment:
       # Required
       - OPENCLAW_AUTH_TOKEN
@@ -47,6 +44,7 @@ services:
       - OPENCLAW_SSH_USER
       - OPENCLAW_SSH_PASSWORD
       - OPENCLAW_SSH_KEY_PATH
+      - OPENCLAW_SSH_KEY_FILE
       - OPENCLAW_SSH_CONNECT_TIMEOUT
       - OPENCLAW_SSH_COMMAND_TIMEOUT
       - OPENCLAW_SSH_HEALTH_CACHE_SECONDS
@@ -61,7 +59,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
+    volumes:
+      - gateway-data:/app/data
+      - ${OPENCLAW_TLS_CERT_DIR:-./certs}:/app/certs:ro
+      - ${OPENCLAW_SSH_KEY_FILE:-/dev/null}:${OPENCLAW_SSH_KEY_PATH:-/app/keys/laptop_ed25519}:ro
 volumes:
   gateway-data:
     driver: local

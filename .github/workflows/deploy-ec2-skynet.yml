@@ -73,6 +73,8 @@ jobs:
       OPENCLAW_SSH_USER: ${{ secrets.OPENCLAW_SSH_USER }}
       OPENCLAW_SSH_PASSWORD: ${{ secrets.OPENCLAW_SSH_PASSWORD }}
       OPENCLAW_SSH_KEY_PATH: ${{ secrets.OPENCLAW_SSH_KEY_PATH }}
+      OPENCLAW_SSH_KEY_FILE: ${{ secrets.OPENCLAW_SSH_KEY_FILE }}
+      OPENCLAW_SSH_PRIVATE_KEY_B64: ${{ secrets.OPENCLAW_SSH_PRIVATE_KEY_B64 }}
       OPENCLAW_SSH_CONNECT_TIMEOUT: ${{ secrets.OPENCLAW_SSH_CONNECT_TIMEOUT }}
       OPENCLAW_SSH_COMMAND_TIMEOUT: ${{ secrets.OPENCLAW_SSH_COMMAND_TIMEOUT }}
       OPENCLAW_SSH_HEALTH_CACHE_SECONDS: ${{ secrets.OPENCLAW_SSH_HEALTH_CACHE_SECONDS }}
@@ -95,6 +97,19 @@ jobs:
           : "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN secret}"
           : "${TELEGRAM_ALLOWED_USER_ID:?Missing TELEGRAM_ALLOWED_USER_ID secret}"
           : "${GOOGLE_AI_API_KEY:?Missing GOOGLE_AI_API_KEY secret}"
+
+      - name: Prepare SSH key material
+        shell: bash
+        run: |
+          if [ -n "${OPENCLAW_SSH_PRIVATE_KEY_B64:-}" ]; then
+            mkdir -p .secrets
+            printf '%s' "${OPENCLAW_SSH_PRIVATE_KEY_B64}" | base64 -d > .secrets/laptop_ed25519
+            chmod 600 .secrets/laptop_ed25519
+            echo "OPENCLAW_SSH_KEY_FILE=.secrets/laptop_ed25519" >> "$GITHUB_ENV"
+            if [ -z "${OPENCLAW_SSH_KEY_PATH:-}" ]; then
+              echo "OPENCLAW_SSH_KEY_PATH=/app/keys/laptop_ed25519" >> "$GITHUB_ENV"
+            fi
+          fi
 
       - name: Build deployment env file
         shell: bash
@@ -134,6 +149,7 @@ jobs:
             printf 'OPENCLAW_SSH_USER=%s\n' "${OPENCLAW_SSH_USER}"
             printf 'OPENCLAW_SSH_PASSWORD=%s\n' "${OPENCLAW_SSH_PASSWORD}"
             printf 'OPENCLAW_SSH_KEY_PATH=%s\n' "${OPENCLAW_SSH_KEY_PATH}"
+            printf 'OPENCLAW_SSH_KEY_FILE=%s\n' "${OPENCLAW_SSH_KEY_FILE:-/dev/null}"
             printf 'OPENCLAW_SSH_CONNECT_TIMEOUT=%s\n' "${OPENCLAW_SSH_CONNECT_TIMEOUT:-4}"
             printf 'OPENCLAW_SSH_COMMAND_TIMEOUT=%s\n' "${OPENCLAW_SSH_COMMAND_TIMEOUT:-180}"
             printf 'OPENCLAW_SSH_HEALTH_CACHE_SECONDS=%s\n' "${OPENCLAW_SSH_HEALTH_CACHE_SECONDS:-15}"
@@ -226,4 +242,4 @@ jobs:
       - name: Cleanup env file
         if: always()
         shell: bash
-        run: rm -f .env.ci
+        run: rm -f .env.ci .secrets/laptop_ed25519
