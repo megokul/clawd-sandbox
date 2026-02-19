@@ -63,6 +63,7 @@ _CHAT_SYSTEM_PROMPT = (
     "Do not output JSON unless the user explicitly asks for JSON."
 )
 _last_project_id: str | None = None
+_CHAT_PROVIDER_ALLOWLIST = ["gemini", "groq", "openrouter", "deepseek", "openai", "claude"]
 
 
 def set_dependencies(
@@ -201,6 +202,20 @@ def _build_assistant_content(response) -> object:
     return parts if parts else response.text
 
 
+def _friendly_ai_error(exc: Exception) -> str:
+    """Convert provider stack errors into a concise user-facing message."""
+    text = str(exc)
+    lower = text.lower()
+    if "resource_exhausted" in lower or "quota" in lower or "429" in lower or "rate" in lower:
+        return (
+            "AI quota/rate limit reached for the current provider. "
+            "I will use fallback cloud providers if available; otherwise add/refresh provider keys."
+        )
+    if "no ai providers available" in lower:
+        return "No cloud AI providers are currently available. Add at least one active API key."
+    return f"OpenClaw chat error: {text}"
+
+
 async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
     """Route natural conversation through OpenClaw tools + skills."""
     if not _provider_router:
@@ -244,7 +259,7 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
                 require_tools=True,
                 task_type="general",
                 preferred_provider="gemini",
-                preferred_provider_only=True,
+                allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
             )
             messages.append({"role": "assistant", "content": _build_assistant_content(response)})
 
@@ -277,7 +292,7 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
             messages.append({"role": "user", "content": tool_results})
             rounds += 1
     except Exception as exc:
-        await update.message.reply_text(f"OpenClaw chat error: {exc}")
+        await update.message.reply_text(_friendly_ai_error(exc))
         return
 
     if not final_text:
@@ -291,7 +306,7 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
                 max_tokens=700,
                 task_type="general",
                 preferred_provider="gemini",
-                preferred_provider_only=True,
+                allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
             )
             final_text = (summary.text or "").strip()
         except Exception:
@@ -326,10 +341,10 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
             max_tokens=700,
             task_type="general",
             preferred_provider="gemini",
-            preferred_provider_only=True,
+            allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
         )
     except Exception as exc:
-        await update.message.reply_text(f"AI unavailable: {exc}")
+        await update.message.reply_text(_friendly_ai_error(exc))
         return
 
     reply = (response.text or "").strip() or "I could not generate a reply right now."

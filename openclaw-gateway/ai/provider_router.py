@@ -78,6 +78,7 @@ class ProviderRouter:
         task_type: str = "general",
         preferred_provider: str | None = None,
         preferred_provider_only: bool = False,
+        allowed_providers: set[str] | None = None,
     ) -> list[BaseProvider]:
         """
         Return providers sorted by task-aware priority, filtered by
@@ -87,6 +88,8 @@ class ProviderRouter:
         scored: list[tuple[BaseProvider, int]] = []
 
         for p in self.providers:
+            if allowed_providers is not None and p.name not in allowed_providers:
+                continue
             if preferred_provider_only and preferred_provider and p.name != preferred_provider:
                 continue
             if require_tools and not p.supports_tool_use:
@@ -122,6 +125,7 @@ class ProviderRouter:
         task_type: str = "general",
         preferred_provider: str | None = None,
         preferred_provider_only: bool = False,
+        allowed_providers: list[str] | None = None,
     ) -> ProviderResponse:
         """
         Send a chat request to the best available provider.
@@ -134,6 +138,7 @@ class ProviderRouter:
             task_type=task_type,
             preferred_provider=preferred_provider,
             preferred_provider_only=preferred_provider_only,
+            allowed_providers=set(allowed_providers) if allowed_providers else None,
         )
         if not candidates:
             raise RuntimeError(
