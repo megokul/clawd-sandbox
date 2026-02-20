@@ -9,16 +9,38 @@ SECURITY: In production, load secrets from environment variables.
 
 import os
 
+
+def _str_env(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN: str = os.environ.get(
+TELEGRAM_BOT_TOKEN: str = _str_env(
     "TELEGRAM_BOT_TOKEN",
     "8524123888:AAFxY-nqK0gLGt87pdStkxXEpPoA6bjBHu4",
 )
 
 # Only this Telegram user ID can issue commands.
-ALLOWED_USER_ID: int = int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", "7152683074"))
+ALLOWED_USER_ID: int = _int_env("TELEGRAM_ALLOWED_USER_ID", 7152683074)
 
 # Gateway HTTP API (runs on the same machine).
 GATEWAY_API_URL: str = "http://127.0.0.1:8766"
@@ -76,10 +98,10 @@ AUTO_APPROVE_AND_START: bool = os.environ.get(
     "AUTO_APPROVE_AND_START",
     os.environ.get("OPENCLAW_AUTO_APPROVE_AND_START", "1"),
 ).strip().lower() in {"1", "true", "yes", "on"}
-AUTO_PLAN_MIN_IDEAS: int = int(os.environ.get(
+AUTO_PLAN_MIN_IDEAS: int = _int_env(
     "AUTO_PLAN_MIN_IDEAS",
-    os.environ.get("OPENCLAW_AUTO_PLAN_MIN_IDEAS", "3"),
-))
+    _int_env("OPENCLAW_AUTO_PLAN_MIN_IDEAS", 3),
+)
 AUTO_BOOTSTRAP_PROJECT: bool = os.environ.get(
     "AUTO_BOOTSTRAP_PROJECT",
     os.environ.get("OPENCLAW_AUTO_BOOTSTRAP_PROJECT", "1"),
