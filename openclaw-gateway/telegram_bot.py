@@ -1,5 +1,5 @@
-"""
-SKYNET Gateway — Telegram Bot
+﻿"""
+SKYNET Gateway â€” Telegram Bot
 
 Bridges Telegram to the SKYNET Gateway API and the SKYNET Core
 orchestrator. Handles idea capture, plan generation, autonomous coding
@@ -526,6 +526,34 @@ def _extract_textual_tool_call(text: str) -> ToolCall | None:
         tool_id = str(obj.get("id") or f"text_tool_{uuid.uuid4().hex[:10]}")
         return ToolCall(id=tool_id, name=name.strip(), input=tool_input)
 
+    return None
+
+
+def _extract_json_object(text: str) -> dict | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    candidates: list[str] = [raw]
+    if raw.startswith("```"):
+        fenced = raw.strip("`").strip()
+        fenced = re.sub(r"^(json|javascript|python)\s*", "", fenced, flags=re.IGNORECASE)
+        candidates.append(fenced.strip())
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+
+    for cand in candidates:
+        obj = None
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            try:
+                obj = ast.literal_eval(cand)
+            except Exception:
+                obj = None
+        if isinstance(obj, dict):
+            return obj
     return None
 
 
@@ -1175,6 +1203,102 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
     return {}
 
 
+_ALLOWED_NL_INTENTS = {
+    "help",
+    "check_coding_agents",
+    "open_in_vscode",
+    "run_coding_agent",
+    "configure_coding_agent",
+    "create_project",
+    "list_projects",
+    "add_idea",
+    "generate_plan",
+    "approve_and_start",
+    "pause_project",
+    "resume_project",
+    "cancel_project",
+    "project_status",
+}
+
+
+def _sanitize_nl_intent_payload(payload: dict | None) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    intent = str(payload.get("intent", "")).strip().lower()
+    if intent in {"", "none", "chat", "general"}:
+        return {}
+    if intent not in _ALLOWED_NL_INTENTS:
+        return {}
+
+    out: dict[str, str] = {"intent": intent}
+    if isinstance(payload.get("project_name"), str) and payload.get("project_name", "").strip():
+        out["project_name"] = _clean_entity(str(payload["project_name"]))
+    if isinstance(payload.get("idea_text"), str) and payload.get("idea_text", "").strip():
+        out["idea_text"] = str(payload["idea_text"]).strip()
+    if isinstance(payload.get("agent"), str) and payload.get("agent", "").strip():
+        out["agent"] = _clean_entity(str(payload["agent"])).lower()
+    if isinstance(payload.get("prompt"), str) and payload.get("prompt", "").strip():
+        out["prompt"] = str(payload["prompt"]).strip()
+    if isinstance(payload.get("working_dir"), str) and payload.get("working_dir", "").strip():
+        out["working_dir"] = str(payload["working_dir"]).strip()
+    if isinstance(payload.get("provider"), str) and payload.get("provider", "").strip():
+        out["provider"] = _clean_entity(str(payload["provider"])).lower()
+    if isinstance(payload.get("model"), str) and payload.get("model", "").strip():
+        out["model"] = str(payload["model"]).strip()
+    if isinstance(payload.get("path"), str) and payload.get("path", "").strip():
+        out["path"] = str(payload["path"]).strip()
+
+    return out
+
+
+async def _extract_nl_intent_llm(text: str) -> dict[str, str]:
+    """LLM-first natural-language intent extraction for Telegram actions."""
+    if not _provider_router:
+        return {}
+    raw = (text or "").strip()
+    if not raw or _is_smalltalk_or_ack(raw):
+        return {}
+
+    system_prompt = (
+        "You are an intent classifier for a Telegram automation bot.\n"
+        "Return ONLY one JSON object.\n"
+        "Intent must be one of: none, help, check_coding_agents, open_in_vscode, "
+        "run_coding_agent, configure_coding_agent, create_project, list_projects, "
+        "add_idea, generate_plan, approve_and_start, pause_project, resume_project, "
+        "cancel_project, project_status.\n"
+        "Extract fields only when present: project_name, idea_text, agent, prompt, "
+        "working_dir, provider, model, path.\n"
+        "Rules:\n"
+        "- If user asks to create/start a new project but gives no name, use create_project with no project_name.\n"
+        "- If user asks to start/resume/pause/cancel an existing project, do NOT use create_project.\n"
+        "- If unsure, return {\"intent\":\"none\"}."
+    )
+    try:
+        response = await _provider_router.chat(
+            [{"role": "user", "content": raw}],
+            system=system_prompt,
+            max_tokens=220,
+            task_type="general",
+            allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
+        )
+    except Exception as exc:
+        logger.debug("LLM intent extraction failed: %s", exc)
+        return {}
+
+    payload = _extract_json_object(response.text or "")
+    return _sanitize_nl_intent_payload(payload)
+
+
+async def _extract_nl_intent_hybrid(text: str) -> dict[str, str]:
+    """
+    Strict NL policy: use LLM intent extraction first, regex as resilience fallback.
+    """
+    llm_intent = await _extract_nl_intent_llm(text)
+    if llm_intent:
+        return llm_intent
+    return _extract_nl_intent(text)
+
+
 async def _resolve_project(reference: str | None = None) -> tuple[dict | None, str | None]:
     """Resolve a natural-language project reference to a concrete project."""
     global _last_project_id
@@ -1302,7 +1426,7 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
     Returns True when a structured action was handled.
     """
     global _last_project_id
-    intent_data = _extract_nl_intent(text)
+    intent_data = await _extract_nl_intent_hybrid(text)
     if not intent_data:
         return False
 
@@ -1623,7 +1747,7 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
     if (text or "").strip().startswith("/"):
         return False
 
-    intent_data = _extract_nl_intent(text)
+    intent_data = await _extract_nl_intent_hybrid(text)
     if intent_data:
         # User provided a full create instruction as follow-up.
         if intent_data.get("intent") == "create_project" and intent_data.get("project_name"):
@@ -1927,15 +2051,15 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         status_icons = {
-            "ideation": "💡", "planning": "📝", "approved": "✅",
-            "coding": "⚙️", "testing": "🧪", "completed": "🎉",
-            "paused": "⏸️", "failed": "❌", "cancelled": "🛑",
+            "ideation": "ðŸ’¡", "planning": "ðŸ“", "approved": "âœ…",
+            "coding": "âš™ï¸", "testing": "ðŸ§ª", "completed": "ðŸŽ‰",
+            "paused": "â¸ï¸", "failed": "âŒ", "cancelled": "ðŸ›‘",
         }
         lines = ["<b>Projects:</b>\n"]
         for p in projects:
-            icon = status_icons.get(p["status"], "📋")
+            icon = status_icons.get(p["status"], "ðŸ“‹")
             lines.append(
-                f"{icon} <b>{html.escape(p['display_name'])}</b> — {p['status']}"
+                f"{icon} <b>{html.escape(p['display_name'])}</b> â€” {p['status']}"
             )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
     except Exception as exc:
@@ -2047,8 +2171,8 @@ async def cmd_quota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         summary = await _provider_router.get_quota_summary()
         lines = ["<b>AI Provider Quota:</b>\n"]
         for p in summary:
-            status = "✅" if p["available"] else "❌"
-            limit = p["daily_limit"] or "∞"
+            status = "âœ…" if p["available"] else "âŒ"
+            limit = p["daily_limit"] or "âˆž"
             lines.append(
                 f"{status} <b>{html.escape(p['provider'])}</b> ({p['model']})\n"
                 f"    {p['daily_used']}/{limit} requests today"
@@ -2504,14 +2628,14 @@ async def cmd_agents(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             lines = [f"<b>Agents for {html.escape(project['display_name'])}:</b>\n"]
             for a in agents:
                 lines.append(
-                    f"  {a['role']} — {a['status']} "
+                    f"  {a['role']} â€” {a['status']} "
                     f"({a.get('tasks_completed', 0)} tasks)"
                 )
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         else:
             lines = ["<b>Available Agent Roles:</b>\n"]
             for role, cfg_data in AGENT_CONFIGS.items():
-                lines.append(f"  <b>{role}</b> — {html.escape(cfg_data['description'])}")
+                lines.append(f"  <b>{role}</b> â€” {html.escape(cfg_data['description'])}")
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
@@ -2595,7 +2719,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ------------------------------------------------------------------
-# Plain text handler — natural conversation + intent extraction
+# Plain text handler â€” natural conversation + intent extraction
 # ------------------------------------------------------------------
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2684,11 +2808,12 @@ def build_app() -> Application:
     # Inline buttons.
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Plain text → idea capture.
+    # Plain text â†’ idea capture.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     _bot_app = app
     return app
+
 
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import importlib.util
 import sys
 
+import pytest
 
 def _load_module(path: Path, module_name: str):
     gateway_root = str(path.parent)
@@ -60,3 +61,31 @@ def test_start_the_project_not_misclassified_as_new_project() -> None:
         "a small app when clicked gives a 1 sec beep sound."
     )
     assert intent.get("intent") == "approve_and_start"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_intent_prefers_llm_result() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_5")
+
+    async def _fake_llm(_: str) -> dict[str, str]:
+        return {"intent": "list_projects"}
+
+    bot._extract_nl_intent_llm = _fake_llm
+    out = await bot._extract_nl_intent_hybrid("can we do a project")
+    assert out.get("intent") == "list_projects"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_intent_falls_back_to_rules() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_6")
+
+    async def _fake_llm(_: str) -> dict[str, str]:
+        return {}
+
+    bot._extract_nl_intent_llm = _fake_llm
+    out = await bot._extract_nl_intent_hybrid("can we do a project")
+    assert out.get("intent") == "create_project"
