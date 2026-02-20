@@ -939,10 +939,67 @@ def _is_smalltalk_or_ack(text: str) -> bool:
     lowered = (text or "").strip().lower()
     return bool(
         re.fullmatch(
-            r"(hi|hello|hey|yo|sup|thanks|thank you|ok|okay|cool|great|nice|got it|understood)[.!? ]*",
+            (
+                r"("
+                r"(?:hi|hello|hey|yo|sup)(?:\s+(?:there|skynet|bot))?"
+                r"|good\s+(?:morning|afternoon|evening)"
+                r"|thanks|thank you|ok|okay|cool|great|nice|got it|understood"
+                r")[.!? ]*"
+            ),
             lowered,
         ),
     )
+
+
+def _smalltalk_reply(text: str) -> str:
+    lowered = (text or "").strip().lower()
+    if any(tok in lowered for tok in ("thanks", "thank you")):
+        return "You're welcome. What should we work on next?"
+    return "Hi! How can I help today?"
+
+
+async def _smalltalk_reply_with_context(update: Update, text: str) -> str:
+    """
+    Greeting policy:
+    - Stay on current topic when there is an active pending workflow.
+    - Otherwise keep greeting brief and open-ended.
+    """
+    base = _smalltalk_reply(text)
+    key = _doc_intake_key(update)
+    if key is not None:
+        if key in _pending_project_name_requests:
+            return base + " I am waiting for the project name. Reply with the name only, or say 'cancel'."
+        intake = _pending_project_doc_intake.get(key)
+        if intake:
+            idx = int(intake.get("step_index", 0))
+            total = len(_PROJECT_DOC_INTAKE_STEPS)
+            if 0 <= idx < total:
+                q = _PROJECT_DOC_INTAKE_STEPS[idx][1]
+                return base + f" Let's continue the project documentation intake. Q{idx + 1}/{total}: {q}"
+
+    if _project_manager is None or not _last_project_id:
+        return base
+
+    try:
+        from db import store
+
+        project = await store.get_project(_project_manager.db, _last_project_id)
+    except Exception:
+        logger.exception("Failed resolving current project for contextual smalltalk.")
+        project = None
+
+    if not project:
+        return base
+
+    active_statuses = {"ideation", "planning", "approved", "coding", "testing", "paused"}
+    status = str(project.get("status", "")).strip().lower()
+    if status in active_statuses:
+        return (
+            base
+            + f" We are currently on '{_project_display(project)}' ({status}). "
+            "Do you want to continue this topic or switch to something else?"
+        )
+    return base
 
 
 def _norm_project(text: str) -> str:
@@ -3325,6 +3382,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if await _maybe_handle_project_doc_intake(update, text):
+        return
+
+    # Keep greetings/acks deterministic and out of tool execution flows.
+    if _is_smalltalk_or_ack(text):
+        reply = await _smalltalk_reply_with_context(update, text)
+        await update.message.reply_text(reply)
+        await _append_user_conversation(
+            update,
+            role="assistant",
+            content=reply,
+            metadata={"channel": "smalltalk"},
+        )
         return
 
     # Optional explicit idea prefix while in chat mode.
