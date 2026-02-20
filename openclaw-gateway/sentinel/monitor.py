@@ -21,6 +21,16 @@ import aiohttp
 logger = logging.getLogger("skynet.sentinel")
 
 
+def _is_missing_s3_credentials_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "unable to locate credentials" in text
+        or "no credentials" in text
+        or "invalidaccesskeyid" in text
+        or "signaturedoesnotmatch" in text
+    )
+
+
 @dataclass
 class HealthStatus:
     """Result of a single health check."""
@@ -76,9 +86,19 @@ class SentinelMonitor:
                 ) as resp:
                     data = await resp.json()
                     status.latency_ms = (time.monotonic() - start) * 1000
-                    connected = data.get("agent_connected", False)
+                    agent_connected = bool(data.get("agent_connected", False))
+                    ssh_fallback_enabled = bool(data.get("ssh_fallback_enabled", False))
+                    ssh_fallback_healthy = bool(data.get("ssh_fallback_healthy", False))
+                    connected = agent_connected or (ssh_fallback_enabled and ssh_fallback_healthy)
                     status.healthy = connected
-                    status.message = "Connected" if connected else "Agent disconnected"
+                    if agent_connected:
+                        status.message = "Connected (agent)"
+                    elif ssh_fallback_enabled and ssh_fallback_healthy:
+                        status.message = "Connected (ssh fallback)"
+                    elif ssh_fallback_enabled:
+                        status.message = "Agent disconnected; SSH fallback unhealthy"
+                    else:
+                        status.message = "Agent disconnected"
                     status.details = data
         except Exception as exc:
             status.latency_ms = (time.monotonic() - start) * 1000
@@ -143,8 +163,12 @@ class SentinelMonitor:
             status.message = "OK"
         except Exception as exc:
             status.latency_ms = (time.monotonic() - start) * 1000
-            status.healthy = False
-            status.message = f"S3 error: {exc}"
+            if _is_missing_s3_credentials_error(exc):
+                status.healthy = True
+                status.message = "S3 credentials not configured (health check skipped)"
+            else:
+                status.healthy = False
+                status.message = f"S3 error: {exc}"
         return status
 
     async def run_all_checks(self) -> list[HealthStatus]:

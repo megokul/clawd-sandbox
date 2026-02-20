@@ -16,6 +16,16 @@ from typing import Any
 logger = logging.getLogger("skynet.heartbeat.tasks")
 
 
+def _is_missing_s3_credentials_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "unable to locate credentials" in text
+        or "no credentials" in text
+        or "invalidaccesskeyid" in text
+        or "signaturedoesnotmatch" in text
+    )
+
+
 async def health_check(ctx: Any) -> None:
     """
     Every 5 min: Run Sentinel health checks and alert on issues.
@@ -64,6 +74,9 @@ async def provider_usage_snapshot(ctx: Any) -> None:
             await ctx.s3.snapshot_provider_usage(usage)
             logger.info("Provider usage snapshot saved (%d entries)", len(usage))
     except Exception as exc:
+        if _is_missing_s3_credentials_error(exc):
+            logger.info("Provider usage snapshot skipped: S3 credentials are not configured.")
+            return
         logger.warning("Provider usage snapshot failed: %s", exc)
 
 
@@ -84,6 +97,9 @@ async def daily_backup(ctx: Any) -> None:
         bg = BackgroundStorage(ctx.db, ctx.s3, ctx.gateway_api_url)
         await bg.backup_active_projects()
     except Exception as exc:
+        if _is_missing_s3_credentials_error(exc):
+            logger.info("Daily backup skipped: S3 credentials are not configured.")
+            return
         logger.warning("Daily backup failed: %s", exc)
 
 

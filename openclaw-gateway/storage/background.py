@@ -135,7 +135,13 @@ class BackgroundScheduler:
         except Exception:
             logger.exception("Failed to archive old conversations.")
 
-    async def backup_project(self, project_slug: str, version: int) -> str | None:
+    async def backup_project(
+        self,
+        project_slug: str,
+        version: int,
+        *,
+        working_dir: str | None = None,
+    ) -> str | None:
         """
         Trigger a project backup by zipping the project on the laptop
         and uploading to S3.
@@ -145,25 +151,32 @@ class BackgroundScheduler:
         import aiohttp
 
         try:
+            target_dir = working_dir or f"E:\\MyProjects\\{project_slug}"
+
             # Request the agent to zip the project.
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.gateway_url}/action",
                     json={
                         "action": "zip_project",
-                        "params": {"working_dir": f"E:\\OpenClaw\\projects\\{project_slug}"},
+                        "params": {"working_dir": target_dir},
                         "confirmed": True,
                     },
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as resp:
                     result = await resp.json()
 
-            if result.get("status") != "success":
+            if result.get("status") not in {"ok", "success"}:
                 logger.error("Failed to zip project %s: %s", project_slug, result.get("error"))
                 return None
 
             import base64
             inner = result.get("result", {})
+            rc = int(inner.get("returncode", 0))
+            if rc != 0:
+                err = (inner.get("stderr") or inner.get("stdout") or result.get("error") or "").strip()
+                logger.error("Zip action failed for project %s: %s", project_slug, err or f"exit code {rc}")
+                return None
             zip_b64 = inner.get("stdout", "")
             if not zip_b64:
                 logger.error("Empty zip data for project %s", project_slug)
@@ -177,3 +190,52 @@ class BackgroundScheduler:
         except Exception:
             logger.exception("Failed to backup project %s", project_slug)
             return None
+
+
+class BackgroundStorage:
+    """
+    Compatibility adapter used by heartbeat.daily_backup.
+
+    Keeps the existing heartbeat call signature stable while delegating
+    actual backup logic to BackgroundScheduler.
+    """
+
+    def __init__(
+        self,
+        db: aiosqlite.Connection,
+        s3: S3Storage,
+        gateway_api_url: str,
+    ) -> None:
+        self.db = db
+        self.s3 = s3
+        self.gateway_api_url = gateway_api_url
+        self._scheduler = BackgroundScheduler(s3=s3, db=db, gateway_api_url=gateway_api_url)
+
+    async def backup_active_projects(self) -> None:
+        projects = await store.list_projects(self.db)
+        active = [
+            p for p in projects
+            if str(p.get("status", "")).lower() not in {"cancelled"}
+        ]
+        if not active:
+            logger.info("Daily backup: no projects to back up.")
+            return
+
+        # Stable daily version marker.
+        version = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+        backed_up = 0
+        attempted = 0
+        for project in active:
+            slug = str(project.get("name") or "").strip()
+            if not slug:
+                continue
+            attempted += 1
+            key = await self._scheduler.backup_project(
+                slug,
+                version,
+                working_dir=str(project.get("local_path") or "").strip() or None,
+            )
+            if key:
+                backed_up += 1
+
+        logger.info("Daily backup finished: %d/%d projects backed up.", backed_up, attempted)

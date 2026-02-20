@@ -745,6 +745,35 @@ async def get_user_preferences(
         return [dict(row) for row in await cur.fetchall()]
 
 
+async def get_provider_usage_summary(
+    db: aiosqlite.Connection,
+    date: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Return provider usage summary rows for a date (defaults to today).
+
+    This is a compatibility helper used by heartbeat snapshot tasks.
+    """
+    if date is None:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    async with db.execute(
+        """
+        SELECT
+            provider_name,
+            date,
+            requests_used,
+            tokens_used,
+            errors,
+            last_request_at
+        FROM provider_usage
+        WHERE date = ?
+        ORDER BY provider_name
+        """,
+        (date,),
+    ) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
 async def add_or_update_profile_fact(
     db: aiosqlite.Connection,
     *,
