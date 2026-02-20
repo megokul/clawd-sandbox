@@ -72,6 +72,32 @@ def test_start_the_project_not_misclassified_as_new_project() -> None:
     assert intent.get("intent") == "approve_and_start"
 
 
+def test_followup_implementation_text_not_classified_as_create_project() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_8")
+
+    intent = bot._extract_nl_intent("make it a python app when clicked will produce 1 sec beep")
+    assert intent.get("intent") != "create_project"
+
+
+def test_build_project_typo_maps_to_approve_and_start() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_9")
+
+    intent = bot._extract_nl_intent("build prpjetc")
+    assert intent.get("intent") == "approve_and_start"
+
+
+def test_same_project_phrase_not_treated_as_project_name() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_10")
+
+    assert bot._extract_project_name_candidate("the same project") == ""
+
+
 @pytest.mark.asyncio
 async def test_hybrid_intent_prefers_llm_result() -> None:
     repo_root = Path(__file__).parent.parent

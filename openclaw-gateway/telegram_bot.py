@@ -172,6 +172,52 @@ async def _append_user_conversation(
         logger.exception("Failed to write user conversation record.")
 
 
+async def _load_recent_conversation_messages(
+    update: Update | None,
+    *,
+    limit: int | None = None,
+) -> list[dict]:
+    """
+    Load recent user/assistant turns from durable storage.
+
+    Falls back to process-local history when DB lookup is unavailable.
+    """
+    max_items = int(limit or (_CHAT_HISTORY_MAX * 2))
+    if (
+        update is None
+        or _project_manager is None
+        or not hasattr(_project_manager, "db")
+    ):
+        return _chat_history[-max_items:]
+
+    try:
+        user_row = await _ensure_memory_user(update)
+        if not user_row:
+            return _chat_history[-max_items:]
+        from db import store
+
+        rows = await store.list_user_conversations(
+            _project_manager.db,
+            user_id=int(user_row["id"]),
+            limit=max_items,
+        )
+    except Exception:
+        logger.exception("Failed to load persistent conversation history.")
+        return _chat_history[-max_items:]
+
+    messages: list[dict] = []
+    for row in rows:
+        role = str(row.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        messages.append({"role": role, "content": content[:4000]})
+
+    return messages[-max_items:] if messages else _chat_history[-max_items:]
+
+
 async def _profile_prompt_context(update: Update) -> str:
     if _project_manager is None:
         return ""
@@ -603,7 +649,7 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
         await _reply_naturally_fallback(update, text)
         return
 
-    history = _chat_history[-(_CHAT_HISTORY_MAX * 2):]
+    history = await _load_recent_conversation_messages(update)
     messages = [*history, {"role": "user", "content": text}]
     tools = _skill_registry.get_all_tools()
 
@@ -745,7 +791,7 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
         await update.message.reply_text("AI providers are not configured.")
         return
 
-    history = _chat_history[-(_CHAT_HISTORY_MAX * 2):]
+    history = await _load_recent_conversation_messages(update)
     base_system_prompt = _CHAT_SYSTEM_PROMPT
     if _main_persona_agent.should_delegate(text):
         base_system_prompt += (
@@ -926,9 +972,53 @@ def _is_plausible_project_name(name: str) -> bool:
 def _extract_quoted_project_name_candidate(text: str) -> str:
     for match in re.finditer(r"[\"'`](.+?)[\"'`]", text or ""):
         candidate = _clean_entity(match.group(1))
-        if _is_plausible_project_name(candidate):
+        if _is_plausible_project_name(candidate) and not _is_existing_project_reference_phrase(candidate):
             return candidate
     return ""
+
+
+def _is_existing_project_reference_phrase(text: str) -> bool:
+    cleaned = _clean_entity(text).lower()
+    generic_refs = {
+        "same",
+        "same project",
+        "the same project",
+        "this project",
+        "that project",
+        "current project",
+        "existing project",
+        "it",
+        "this",
+        "that",
+    }
+    return cleaned in generic_refs
+
+
+def _is_explicit_new_project_request(text: str) -> bool:
+    raw = (text or "").strip()
+    lowered = raw.lower()
+    if re.search(
+        r"\b(?:new|another)\s+(?:project|application|repo|proj|app)\b",
+        lowered,
+    ):
+        return True
+    if re.search(
+        r"\b(?:create|start|begin|kick\s*off|make|spin\s*up)\s+"
+        r"(?:a\s+|an\s+|the\s+|my\s+)?(?:new\s+)?"
+        r"(?:project|application|repo|proj|app)\b",
+        raw,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"\b(?:can\s+we|let'?s|i\s+want\s+to)\s+"
+        r"(?:do|create|start|begin|make)\s+"
+        r"(?:a|an|the|my)\s+(?:new\s+)?(?:project|application|repo|proj|app)\b",
+        raw,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
 
 
 def _extract_project_name_candidate(text: str) -> str:
@@ -964,6 +1054,8 @@ def _extract_project_name_candidate(text: str) -> str:
     if any(ch in raw for ch in ".!?;\n"):
         return ""
     name = _clean_entity(raw)
+    if _is_existing_project_reference_phrase(name):
+        return ""
     if len(name.split()) > 8:
         return ""
     return name if _is_plausible_project_name(name) else ""
@@ -1030,8 +1122,23 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
         r"\b(?:start|begin|run|kick\s*off)\s+(?:the|this|that|my)\s+(?:project|proj|app|application|repo)\b",
         raw,
         flags=re.IGNORECASE,
+    ) and not re.search(
+        r"\b(?:make|build|create)\s+(?:it|this|that)\b",
+        lowered,
     ):
         return {"intent": "create_project"}
+
+    if re.search(
+        r"\b(?:execute|run|build|proceed|continue)\b.*\b(?:project|prpjetc|proj|app|it|this|that)\b",
+        lowered,
+    ) or lowered in {
+        "execute",
+        "run it",
+        "build project",
+        "build prpjetc",
+        "execute project",
+    }:
+        return {"intent": "approve_and_start"}
 
     # Add idea
     match = re.search(
@@ -1319,7 +1426,7 @@ def _sanitize_nl_intent_payload(payload: dict | None) -> dict[str, str]:
     return out
 
 
-async def _extract_nl_intent_llm(text: str) -> dict[str, str]:
+async def _extract_nl_intent_llm(text: str, update: Update | None = None) -> dict[str, str]:
     """LLM-first natural-language intent extraction for Telegram actions."""
     if not _provider_router:
         return {}
@@ -1339,11 +1446,14 @@ async def _extract_nl_intent_llm(text: str) -> dict[str, str]:
         "Rules:\n"
         "- If user asks to create/start a new project but gives no name, use create_project with no project_name.\n"
         "- If user asks to start/resume/pause/cancel an existing project, do NOT use create_project.\n"
+        "- Use recent conversation context for references like 'same project', 'it', 'that'.\n"
         "- If unsure, return {\"intent\":\"none\"}."
     )
+    history = await _load_recent_conversation_messages(update, limit=8)
+    llm_messages = [*history, {"role": "user", "content": raw}]
     try:
         response = await _provider_router.chat(
-            [{"role": "user", "content": raw}],
+            llm_messages,
             system=system_prompt,
             max_tokens=220,
             task_type="general",
@@ -1357,12 +1467,16 @@ async def _extract_nl_intent_llm(text: str) -> dict[str, str]:
     return _sanitize_nl_intent_payload(payload)
 
 
-async def _extract_nl_intent_hybrid(text: str) -> dict[str, str]:
+async def _extract_nl_intent_hybrid(text: str, update: Update | None = None) -> dict[str, str]:
     """
     Strict NL policy: use LLM intent extraction first, regex as resilience fallback.
     """
     regex_intent = _extract_nl_intent(text)
-    llm_intent = await _extract_nl_intent_llm(text)
+    try:
+        llm_intent = await _extract_nl_intent_llm(text, update=update)
+    except TypeError:
+        # Backward-compatible for tests/mocks that still implement (text) only.
+        llm_intent = await _extract_nl_intent_llm(text)  # type: ignore[misc]
     if not llm_intent:
         return regex_intent
     if not regex_intent:
@@ -1529,7 +1643,7 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
     Returns True when a structured action was handled.
     """
     global _last_project_id
-    intent_data = await _extract_nl_intent_hybrid(text)
+    intent_data = await _extract_nl_intent_hybrid(text, update=update)
     if not intent_data:
         return False
 
@@ -1625,7 +1739,20 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
 
     if intent == "create_project":
         name = intent_data.get("project_name", "")
+        if name and _is_existing_project_reference_phrase(name):
+            project, error = await _resolve_project()
+            if error:
+                await update.message.reply_text(error)
+            else:
+                _last_project_id = project["id"]
+                await update.message.reply_text(
+                    f"Using existing project '{_project_display(project)}'. Share implementation details and I will proceed."
+                )
+            return True
         if not name:
+            if not _is_explicit_new_project_request(text):
+                # Likely follow-up details for current context; allow idea capture path.
+                return False
             key = _pending_project_name_key(update)
             if key is not None:
                 _pending_project_name_requests[key] = {"expected": "project_name"}
@@ -1875,14 +2002,35 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
                     logger.exception("Failed capturing follow-up idea after project-name reply.")
         return handled
 
+    if _is_existing_project_reference_phrase(text):
+        _pending_project_name_requests.pop(key, None)
+        project, error = await _resolve_project()
+        if error:
+            await update.message.reply_text(error)
+        else:
+            await update.message.reply_text(
+                f"Continuing with '{_project_display(project)}'. Share the app details and I will proceed."
+            )
+        return True
+
     lowered = (text or "").strip().lower()
     if lowered in {"cancel", "cancel it", "never mind", "nevermind", "forget it"}:
         _pending_project_name_requests.pop(key, None)
         await update.message.reply_text("Okay, cancelled project creation.")
         return True
 
-    intent_data = await _extract_nl_intent_hybrid(text)
+    intent_data = await _extract_nl_intent_hybrid(text, update=update)
     if intent_data and intent_data.get("intent") == "create_project" and intent_data.get("project_name"):
+        if _is_existing_project_reference_phrase(intent_data.get("project_name", "")):
+            _pending_project_name_requests.pop(key, None)
+            project, error = await _resolve_project()
+            if error:
+                await update.message.reply_text(error)
+            else:
+                await update.message.reply_text(
+                    f"Continuing with '{_project_display(project)}'. Share the app details and I will proceed."
+                )
+            return True
         _pending_project_name_requests.pop(key, None)
         return await _create_project_from_name(update, intent_data["project_name"])
 
