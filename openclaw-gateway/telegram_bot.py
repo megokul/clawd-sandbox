@@ -1311,6 +1311,17 @@ async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
     if (text or "").strip().startswith("/"):
         return False
 
+    # Keep greetings out of intake capture so the user can naturally greet
+    # without corrupting documentation fields.
+    if _is_smalltalk_or_ack(text):
+        return False
+
+    # If the user asks to start a new project while intake is pending, switch
+    # context immediately and let the normal create-project flow run.
+    if _is_explicit_new_project_request(text):
+        _pending_project_doc_intake.pop(key, None)
+        return False
+
     lowered = (text or "").strip().lower()
     if lowered in {"skip", "skip docs", "cancel docs", "stop docs", "later"}:
         _pending_project_doc_intake.pop(key, None)
@@ -1397,13 +1408,13 @@ def _is_explicit_new_project_request(text: str) -> bool:
     raw = (text or "").strip()
     lowered = raw.lower()
     if re.search(
-        r"\b(?:new|another)\s+(?:project|application|repo|proj|app)\b",
+        r"\b(?:new\w*|another)\s+(?:project|application|repo|proj|app)\b",
         lowered,
     ):
         return True
     if re.search(
         r"\b(?:create|start|begin|kick\s*off|make|spin\s*up)\s+"
-        r"(?:a\s+|an\s+|the\s+|my\s+)?(?:new\s+)?"
+        r"(?:a\s+|an\s+|the\s+|my\s+)?(?:new\w*\s+)?"
         r"(?:project|application|repo|proj|app)\b",
         raw,
         flags=re.IGNORECASE,
@@ -1412,7 +1423,7 @@ def _is_explicit_new_project_request(text: str) -> bool:
     if re.search(
         r"\b(?:can\s+we|let'?s|i\s+want\s+to)\s+"
         r"(?:do|create|start|begin|make)\s+"
-        r"(?:a|an|the|my)\s+(?:new\s+)?(?:project|application|repo|proj|app)\b",
+        r"(?:a|an|the|my)\s+(?:new\w*\s+)?(?:project|application|repo|proj|app)\b",
         raw,
         flags=re.IGNORECASE,
     ):
@@ -2001,6 +2012,8 @@ async def _maybe_capture_implicit_idea(update: Update, text: str) -> bool:
     global _last_project_id
     if not _project_manager:
         return False
+    if _is_explicit_new_project_request(text):
+        return False
     if not _looks_like_implicit_idea(text):
         return False
 
@@ -2329,6 +2342,7 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
     try:
         project = await _project_manager.create_project(name)
         _last_project_id = project["id"]
+        docs_ok, docs_err = await _write_initial_project_docs(project, {})
         repo_line = (
             f"\nGitHub: {project.get('github_repo')}"
             if project.get("github_repo") else ""
@@ -2336,10 +2350,16 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
         bootstrap_note = _project_bootstrap_note(project)
         if bootstrap_note:
             bootstrap_note = "\n" + bootstrap_note
+        docs_note = (
+            "\nDocumentation: initialized docs/product/PRD.md, overview.md, and features.md."
+            if docs_ok else
+            f"\nDocumentation warning: baseline docs initialization failed ({docs_err})."
+        )
         await update.message.reply_text(
             (
                 f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}\n"
                 f"{bootstrap_note}\n"
+                f"{docs_note}\n"
                 "Share details naturally. Once details are enough, I can auto-plan and execute."
             )
         )
@@ -3406,6 +3426,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if await _handle_natural_action(update, text):
+        return
+
+    # Deterministic fallback: do not let explicit "new project" requests fall
+    # into generic chat or implicit-idea capture if intent extraction misses.
+    if _is_explicit_new_project_request(text):
+        key = _pending_project_name_key(update)
+        if key is not None:
+            _pending_project_name_requests[key] = {"expected": "project_name"}
+        await update.message.reply_text("Tell me the project name to create.")
         return
 
     if await _maybe_capture_implicit_idea(update, text):
