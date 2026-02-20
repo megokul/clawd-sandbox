@@ -69,6 +69,7 @@ jobs:
       SKYNET_PROJECT_BASE_DIR: ${{ secrets.SKYNET_PROJECT_BASE_DIR }}
       SKYNET_EXTERNAL_SKILL_URLS: ${{ secrets.SKYNET_EXTERNAL_SKILL_URLS }}
       SKYNET_EXTERNAL_SKILLS_DIR: ${{ secrets.SKYNET_EXTERNAL_SKILLS_DIR }}
+      SKYNET_EXTERNAL_SKILLS_CACHE_DIR: ${{ secrets.SKYNET_EXTERNAL_SKILLS_CACHE_DIR }}
       OPENCLAW_EXECUTION_MODE: ${{ secrets.OPENCLAW_EXECUTION_MODE }}
       OPENCLAW_SSH_FALLBACK_ENABLED: ${{ secrets.OPENCLAW_SSH_FALLBACK_ENABLED }}
       OPENCLAW_SSH_HOST: ${{ secrets.OPENCLAW_SSH_HOST }}
@@ -107,12 +108,6 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/repo/openclaw-gateway/external-skills/.remote-cache" || true
           git reset --hard
           git clean -ffdx
-
-      - name: Capture runner uid/gid
-        shell: bash
-        run: |
-          echo "LOCAL_UID=$(id -u)" >> "$GITHUB_ENV"
-          echo "LOCAL_GID=$(id -g)" >> "$GITHUB_ENV"
 
       - name: Validate required secrets
         shell: bash
@@ -186,6 +181,7 @@ jobs:
             printf 'SKYNET_PROJECT_BASE_DIR=%s\n' "${SKYNET_PROJECT_BASE_DIR:-E:\\MyProjects}"
             printf 'SKYNET_EXTERNAL_SKILL_URLS=%s\n' "${SKYNET_EXTERNAL_SKILL_URLS}"
             printf 'SKYNET_EXTERNAL_SKILLS_DIR=%s\n' "${SKYNET_EXTERNAL_SKILLS_DIR}"
+            printf 'SKYNET_EXTERNAL_SKILLS_CACHE_DIR=%s\n' "${SKYNET_EXTERNAL_SKILLS_CACHE_DIR:-/app/data/external-skills-cache}"
             printf 'OPENCLAW_EXECUTION_MODE=%s\n' "${OPENCLAW_EXECUTION_MODE}"
             printf 'OPENCLAW_SSH_FALLBACK_ENABLED=%s\n' "${OPENCLAW_SSH_FALLBACK_ENABLED:-0}"
             printf 'OPENCLAW_SSH_HOST=%s\n' "${OPENCLAW_SSH_HOST}"
@@ -203,8 +199,6 @@ jobs:
             printf 'OPENCLAW_SSH_CODEX_BIN=%s\n' "${OPENCLAW_SSH_CODEX_BIN:-codex}"
             printf 'OPENCLAW_SSH_CLAUDE_BIN=%s\n' "${OPENCLAW_SSH_CLAUDE_BIN:-claude}"
             printf 'OPENCLAW_SSH_CLINE_BIN=%s\n' "${OPENCLAW_SSH_CLINE_BIN:-cline}"
-            printf 'LOCAL_UID=%s\n' "${LOCAL_UID:-1000}"
-            printf 'LOCAL_GID=%s\n' "${LOCAL_GID:-1000}"
           } > .env.ci
           chmod 600 .env.ci
 

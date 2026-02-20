@@ -271,6 +271,10 @@ def build_default_registry(
             os.environ.get("OPENCLAW_EXTERNAL_SKILL_URLS", ""),
         )
         external_skill_urls = [u.strip() for u in raw_urls.replace("\n", ",").split(",") if u.strip()]
+    external_skill_cache_dir = os.environ.get(
+        "SKYNET_EXTERNAL_SKILLS_CACHE_DIR",
+        os.environ.get("OPENCLAW_EXTERNAL_SKILLS_CACHE_DIR", ""),
+    ).strip() or None
 
     registry.set_always_on_prompt_skills(
         always_on_prompt_skills,
@@ -281,6 +285,7 @@ def build_default_registry(
         external_items = load_external_prompt_skills(
             external_skills_dir,
             skill_urls=external_skill_urls,
+            cache_root=external_skill_cache_dir,
         )
         for item in external_items:
             registry.register_prompt_skill(

@@ -198,18 +198,21 @@ def load_external_prompt_skills(
     skills_root: str,
     *,
     skill_urls: list[str] | None = None,
+    cache_root: str | None = None,
     max_chars_per_skill: int = 16_000,
 ) -> list[ExternalPromptSkill]:
     """
     Load SKILL.md files from local directory + optional remote URLs.
 
-    Remote URLs are cached under `<skills_root>/.remote-cache`.
+    Remote URLs are cached under `cache_root` when provided, otherwise
+    under `<skills_root>/.remote-cache`.
     """
     root = Path(skills_root)
     root.mkdir(parents=True, exist_ok=True)
 
+    cache_dir = Path(cache_root) if cache_root else (root / ".remote-cache")
     if skill_urls:
-        sync_remote_skill_urls(skill_urls, str(root / ".remote-cache"))
+        sync_remote_skill_urls(skill_urls, str(cache_dir))
 
     files = sorted(root.rglob("SKILL.md"))
     loaded: list[ExternalPromptSkill] = []
