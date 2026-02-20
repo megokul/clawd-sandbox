@@ -2238,6 +2238,7 @@ def _is_existing_project_reference_phrase(text: str) -> bool:
 def _is_explicit_new_project_request(text: str) -> bool:
     raw = (text or "").strip()
     lowered = raw.lower()
+    descriptor = r"(?:[a-z0-9+._-]+\s+){0,3}?"
     if re.search(
         r"\b(?:new\w*|another)\s+(?:project|application|repo|proj|app)\b",
         lowered,
@@ -2246,7 +2247,8 @@ def _is_explicit_new_project_request(text: str) -> bool:
     if re.search(
         r"\b(?:create|start|begin|kick\s*off|make|spin\s*up)\s+"
         r"(?:a\s+|an\s+|the\s+|my\s+)?(?:new\w*\s+)?"
-        r"(?:project|application|repo|proj|app)\b",
+        + descriptor
+        + r"(?:project|application|repo|proj|app)\b",
         raw,
         flags=re.IGNORECASE,
     ):
@@ -2254,7 +2256,9 @@ def _is_explicit_new_project_request(text: str) -> bool:
     if re.search(
         r"\b(?:can\s+we|let'?s|i\s+want\s+to)\s+"
         r"(?:do|create|start|begin|make)\s+"
-        r"(?:a|an|the|my)\s+(?:new\w*\s+)?(?:project|application|repo|proj|app)\b",
+        r"(?:a\s+|an\s+|the\s+|my\s+)?(?:new\w*\s+)?"
+        + descriptor
+        + r"(?:project|application|repo|proj|app)\b",
         raw,
         flags=re.IGNORECASE,
     ):
@@ -2314,6 +2318,12 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
     # Keep greetings/small talk in regular chat flow.
     if _is_smalltalk_or_ack(raw):
         return {}
+
+    if _is_explicit_new_project_request(raw):
+        candidate = _extract_project_name_candidate(raw)
+        if candidate and not _is_existing_project_reference_phrase(candidate):
+            return {"intent": "create_project", "project_name": candidate}
+        return {"intent": "create_project"}
 
     if re.search(
         r"\b(?:can\s+we|let'?s|i\s+want\s+to|we\s+should)\s+"
