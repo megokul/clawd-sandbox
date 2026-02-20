@@ -895,14 +895,21 @@ def _is_plausible_project_name(name: str) -> bool:
     return True
 
 
+def _extract_quoted_project_name_candidate(text: str) -> str:
+    for match in re.finditer(r"[\"'`](.+?)[\"'`]", text or ""):
+        candidate = _clean_entity(match.group(1))
+        if _is_plausible_project_name(candidate):
+            return candidate
+    return ""
+
+
 def _extract_project_name_candidate(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return ""
-    quoted = re.fullmatch(r"[\"'`]\s*(.+?)\s*[\"'`]", raw)
-    if quoted:
-        name = _clean_entity(quoted.group(1))
-        return name if _is_plausible_project_name(name) else ""
+    quoted_name = _extract_quoted_project_name_candidate(raw)
+    if quoted_name:
+        return quoted_name
 
     # For follow-up name replies, prefer short plain phrases.
     if any(ch in raw for ch in ".!?;\n"):
@@ -925,6 +932,15 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
     # Keep greetings/small talk in regular chat flow.
     if _is_smalltalk_or_ack(raw):
         return {}
+
+    if re.search(
+        r"\b(?:can\s+we|let'?s|i\s+want\s+to|we\s+should)\s+"
+        r"(?:do|work\s+on)\s+(?:a|an|the|my)\s+(?:new\s+)?"
+        r"(?:project|application|repo|proj|app)\b",
+        raw,
+        flags=re.IGNORECASE,
+    ):
+        return {"intent": "create_project"}
 
     # Create project
     create_patterns = [
@@ -1580,6 +1596,26 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
         return True
 
 
+def _extract_followup_idea_after_project_name(text: str, project_name: str) -> str:
+    raw = text or ""
+    idea = raw
+
+    # Prefer removing quoted occurrence first when present.
+    quoted_pattern = re.compile(rf"[\"'`]\s*{re.escape(project_name)}\s*[\"'`]", re.IGNORECASE)
+    idea = quoted_pattern.sub("", idea, count=1)
+
+    if idea == raw:
+        idea = re.sub(re.escape(project_name), "", idea, count=1, flags=re.IGNORECASE)
+
+    idea = re.sub(r"\s*[-:]\s*", " ", idea)
+    idea = re.sub(r"\s+", " ", idea).strip(" .,;:-")
+    if len(idea) < 12:
+        return ""
+    if _is_smalltalk_or_ack(idea):
+        return ""
+    return idea
+
+
 async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
     key = _pending_project_name_key(update)
     if key is None or key not in _pending_project_name_requests:
@@ -1605,7 +1641,27 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
         return True
 
     _pending_project_name_requests.pop(key, None)
-    return await _create_project_from_name(update, candidate)
+    previous_project_id = _last_project_id
+    handled = await _create_project_from_name(update, candidate)
+
+    # If the follow-up also contains build details, capture them as the first idea.
+    new_project_id = _last_project_id
+    if (
+        handled
+        and _project_manager is not None
+        and new_project_id
+        and new_project_id != previous_project_id
+    ):
+        idea_text = _extract_followup_idea_after_project_name(text, candidate)
+        if idea_text:
+            try:
+                count = await _project_manager.add_idea(new_project_id, idea_text)
+                await update.message.reply_text(
+                    f"Captured that as idea #{count} for '{candidate}'.",
+                )
+            except Exception:
+                logger.exception("Failed capturing follow-up idea after project-name reply.")
+    return handled
 
 
 # ------------------------------------------------------------------

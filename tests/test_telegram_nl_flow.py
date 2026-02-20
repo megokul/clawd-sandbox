@@ -31,6 +31,25 @@ def test_create_project_prompt_then_name_parsing() -> None:
     assert bot._extract_project_name_candidate("'boom baby'") == "boom baby"
 
 
+def test_do_project_phrase_maps_to_create_project() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_3")
+
+    intent = bot._extract_nl_intent("can we do a project")
+    assert intent.get("intent") == "create_project"
+    assert "project_name" not in intent
+
+
+def test_pending_name_candidate_from_longer_sentence() -> None:
+    repo_root = Path(__file__).parent.parent
+    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
+    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_4")
+
+    text = "python app. - 'kundan bhai' which when clicked makes a 1 sec beep"
+    assert bot._extract_project_name_candidate(text) == "kundan bhai"
+
+
 def test_start_the_project_not_misclassified_as_new_project() -> None:
     repo_root = Path(__file__).parent.parent
     bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
