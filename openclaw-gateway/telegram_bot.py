@@ -1433,6 +1433,75 @@ def _intake_answers_to_idea_text(project_name: str, answers: dict[str, str]) -> 
     return "\n".join(lines)
 
 
+def _intake_has_any_content(answers: dict[str, str]) -> bool:
+    for key, _question in _PROJECT_DOC_INTAKE_STEPS:
+        value = _sanitize_intake_text(
+            str(answers.get(key, "")),
+            max_chars=_DOC_INTAKE_FIELD_LIMITS.get(key, 1200),
+        )
+        if value:
+            return True
+    return False
+
+
+def _doc_intake_opt_out_requested(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+
+    if lowered in {"skip", "skip docs", "cancel docs", "stop docs", "later"}:
+        return True
+
+    if re.search(
+        r"\b(?:no\s*need|noneed|don't\s*need|dont\s*need|do\s*not\s*need|skip|stop|cancel|avoid)\b"
+        r".{0,40}\b(?:docs?|documentation|prd|write[- ]?up|writeup)\b",
+        lowered,
+    ):
+        return True
+
+    if re.search(
+        r"\b(?:docs?|documentation|prd)\b.{0,40}\b(?:not\s*needed|not\s*required|unnecessary|skip|later)\b",
+        lowered,
+    ):
+        return True
+
+    if re.search(
+        r"\b(?:simple|basic|tiny)\s+(?:app|project)\b",
+        lowered,
+    ) and re.search(
+        r"\b(?:no\s*need|noneed|don't|dont|do\s*not|without)\b.{0,40}\b(?:docs?|documentation|prd)\b",
+        lowered,
+    ):
+        return True
+
+    return False
+
+
+async def _capture_minimal_intake_idea_snapshot(state: dict[str, Any], note: str = "") -> None:
+    if _project_manager is None:
+        return
+    project_id = str(state.get("project_id", "")).strip()
+    if not project_id:
+        return
+    answers = dict(state.get("answers") or {})
+    if not _intake_has_any_content(answers):
+        return
+
+    try:
+        from db import store
+
+        project = await store.get_project(_project_manager.db, project_id)
+        if not project:
+            return
+        idea_text = _intake_answers_to_idea_text(_project_display(project), answers)
+        note_clean = _sanitize_intake_text(note, max_chars=300)
+        if note_clean:
+            idea_text += f"\n- intake_note: {note_clean}"
+        await _project_manager.add_idea(project_id, idea_text)
+    except Exception:
+        logger.exception("Failed capturing minimal intake snapshot.")
+
+
 def _action_result_ok(result: dict[str, Any]) -> tuple[bool, str]:
     if result.get("status") == "error" or result.get("error"):
         return False, str(result.get("error", "Unknown action error"))
@@ -2201,10 +2270,21 @@ async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
         _pending_project_doc_intake.pop(key, None)
         return False
 
-    lowered = (text or "").strip().lower()
-    if lowered in {"skip", "skip docs", "cancel docs", "stop docs", "later"}:
+    if _doc_intake_opt_out_requested(text):
+        answers_snapshot = dict(state.get("answers") or {})
+        state["answers"] = answers_snapshot
         _pending_project_doc_intake.pop(key, None)
-        await update.message.reply_text("Skipped documentation intake. Say 'resume docs intake' to continue later.")
+        _spawn_background_task(
+            _capture_minimal_intake_idea_snapshot(state, note=text),
+            tag=f"doc-intake-skip-snapshot-{state.get('project_id', 'unknown')}",
+        )
+        await update.message.reply_text(
+            (
+                "Understood. I will not force documentation questions for this project.\n"
+                "I kept docs minimal and captured your details as project notes. "
+                "We can continue building."
+            )
+        )
         return True
 
     answers = dict(state.get("answers") or {})
