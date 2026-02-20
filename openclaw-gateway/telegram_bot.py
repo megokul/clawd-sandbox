@@ -1242,6 +1242,53 @@ _ALLOWED_NL_INTENTS = {
 }
 
 
+def _intent_is_actionable(intent_data: dict[str, str]) -> bool:
+    """
+    Return True when an intent has the minimum fields needed for execution.
+    """
+    intent = str(intent_data.get("intent", "")).strip().lower()
+    if not intent:
+        return False
+
+    if intent == "run_coding_agent":
+        agent = str(intent_data.get("agent", "")).strip().lower()
+        prompt = str(intent_data.get("prompt", "")).strip()
+        return agent in {"codex", "claude", "cline"} and bool(prompt)
+
+    if intent == "configure_coding_agent":
+        provider = str(intent_data.get("provider", "")).strip().lower()
+        return provider in {"gemini", "deepseek", "groq", "openrouter", "openai", "anthropic"}
+
+    if intent == "add_idea":
+        return bool(str(intent_data.get("idea_text", "")).strip())
+
+    # Other intents are valid without additional required entities.
+    return True
+
+
+def _merge_intent_payload(
+    preferred: dict[str, str],
+    fallback: dict[str, str],
+) -> dict[str, str]:
+    """
+    Fill missing entities in `preferred` using `fallback` when intent matches.
+    """
+    if not preferred:
+        return dict(fallback)
+    if not fallback:
+        return dict(preferred)
+    if preferred.get("intent") != fallback.get("intent"):
+        return dict(preferred)
+
+    merged = dict(preferred)
+    for key, value in fallback.items():
+        if key == "intent":
+            continue
+        if key not in merged or not str(merged.get(key, "")).strip():
+            merged[key] = value
+    return merged
+
+
 def _sanitize_nl_intent_payload(payload: dict | None) -> dict[str, str]:
     if not isinstance(payload, dict):
         return {}
@@ -1314,10 +1361,45 @@ async def _extract_nl_intent_hybrid(text: str) -> dict[str, str]:
     """
     Strict NL policy: use LLM intent extraction first, regex as resilience fallback.
     """
+    regex_intent = _extract_nl_intent(text)
     llm_intent = await _extract_nl_intent_llm(text)
-    if llm_intent:
+    if not llm_intent:
+        return regex_intent
+    if not regex_intent:
         return llm_intent
-    return _extract_nl_intent(text)
+
+    # If both sources agree on intent, merge entities so missing LLM fields
+    # (for example prompt/agent) are backfilled from regex extraction.
+    if llm_intent.get("intent") == regex_intent.get("intent"):
+        return _merge_intent_payload(llm_intent, regex_intent)
+
+    llm_actionable = _intent_is_actionable(llm_intent)
+    regex_actionable = _intent_is_actionable(regex_intent)
+
+    # Resilience fallback: if LLM output is not executable but regex is,
+    # prefer executable regex intent to avoid dropping the user's action.
+    if not llm_actionable and regex_actionable:
+        logger.debug(
+            "Intent mismatch; selecting actionable regex intent (llm=%s, regex=%s)",
+            llm_intent,
+            regex_intent,
+        )
+        return regex_intent
+
+    # If LLM returned a generic "create_project" without a name but regex found
+    # a specific actionable command (for example run_coding_agent), use regex.
+    if (
+        llm_intent.get("intent") == "create_project"
+        and not str(llm_intent.get("project_name", "")).strip()
+        and regex_actionable
+    ):
+        logger.debug(
+            "LLM returned generic create_project; selecting more specific regex intent=%s",
+            regex_intent,
+        )
+        return regex_intent
+
+    return llm_intent
 
 
 async def _resolve_project(reference: str | None = None) -> tuple[dict | None, str | None]:
