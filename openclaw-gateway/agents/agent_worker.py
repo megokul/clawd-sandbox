@@ -15,6 +15,8 @@ import aiosqlite
 
 from ai.provider_router import ProviderRouter
 from ai.prompts import get_agent_prompt
+from agents.archivist import ArchivistAgent
+from agents.manager_watcher import ManagerWatcherAgent
 from db import store
 from search.web_search import WebSearcher
 from skills.registry import SkillRegistry
@@ -55,6 +57,8 @@ class AgentWorker:
         self.cancel_event = cancel_event
         self.on_progress = on_progress
         self.request_approval = request_approval
+        self.manager_watcher = ManagerWatcherAgent(db=self.db, on_progress=self.on_progress)
+        self.archivist = ArchivistAgent(db=self.db)
 
     async def run(self) -> None:
         """Main execution loop — fetch tasks, dispatch to agents, test."""
@@ -147,11 +151,13 @@ class AgentWorker:
             if self.memory_manager:
                 await self.memory_manager.sync_to_s3(self.project_id)
 
+            summary_artifact_id = await self.archivist.record_project_summary(project=project)
             await store.update_project(self.db, self.project_id, status="completed")
             await self._notify(
                 "completed",
                 f"Project {project['display_name']} is complete!"
-                + (f"\nGitHub: {project.get('github_repo', '')}" if project.get("github_repo") else ""),
+                + (f"\nGitHub: {project.get('github_repo', '')}" if project.get("github_repo") else "")
+                + f"\nSummary artifact: {summary_artifact_id}",
             )
 
         except Exception as exc:
@@ -225,6 +231,23 @@ class AgentWorker:
             "task_started",
             f"[{task_num}/{total_tasks}] {config['display_name']}: {task['title']}",
         )
+        run_id = await self.manager_watcher.start_run(
+            project_id=self.project_id,
+            task_id=int(task["id"]),
+            task_title=str(task.get("title", "")),
+            agent_id=agent_id,
+            agent_role=role,
+        )
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self.manager_watcher.heartbeat_loop(
+                project_id=self.project_id,
+                run_id=run_id,
+                task_title=str(task.get("title", "")),
+                stop_event=heartbeat_stop,
+            ),
+            name=f"manager-heartbeat-{self.project_id}-{task['id']}",
+        )
 
         agent = SpecializedAgent(
             agent_id=agent_id,
@@ -242,22 +265,58 @@ class AgentWorker:
             request_approval=self.request_approval,
         )
 
-        final_text = await agent.execute_task(project, task)
+        try:
+            final_text = await agent.execute_task(project, task)
+            await self.manager_watcher.finish_run_success(
+                project_id=self.project_id,
+                run_id=run_id,
+                summary=final_text,
+            )
 
-        # Update task and agent records.
-        await store.update_task(
-            self.db, task["id"],
-            status="completed",
-            result_summary=final_text[:500],
-            completed_at=store._now(),
-        )
-        await store.update_agent(
-            self.db, agent_id,
-            status="idle",
-            tasks_completed_delta=1,
-            last_active_at=store._now(),
-        )
-        await self._notify("task_completed", f"Completed: {task['title']}")
+            # Update task and agent records.
+            await store.update_task(
+                self.db, task["id"],
+                status="completed",
+                result_summary=final_text[:500],
+                completed_at=store._now(),
+            )
+            await store.update_agent(
+                self.db, agent_id,
+                status="idle",
+                tasks_completed_delta=1,
+                last_active_at=store._now(),
+            )
+            artifact_id = await self.archivist.record_task_report(
+                project=project,
+                task=task,
+                agent_role=role,
+                run_id=run_id,
+                result_summary=final_text,
+            )
+            await self._notify(
+                "task_completed",
+                f"Completed: {task['title']} (report artifact: {artifact_id})",
+            )
+        except Exception as exc:
+            await self.manager_watcher.finish_run_failed(
+                project_id=self.project_id,
+                run_id=run_id,
+                error_message=str(exc),
+            )
+            await store.update_task(
+                self.db,
+                task["id"],
+                status="failed",
+                error_message=str(exc)[:500],
+                completed_at=store._now(),
+            )
+            raise
+        finally:
+            heartbeat_stop.set()
+            try:
+                await heartbeat_task
+            except Exception:
+                logger.debug("Heartbeat task closed with error", exc_info=True)
 
     async def _final_testing(self, project: dict) -> None:
         """Run final validation using the testing agent."""

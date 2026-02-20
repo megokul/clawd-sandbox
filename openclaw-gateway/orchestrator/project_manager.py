@@ -16,8 +16,8 @@ import aiohttp
 import aiosqlite
 
 from agents.roles import AGENT_CONFIGS, ALL_ROLES
+from agents.planner_agent import PlannerAgent
 from ai.provider_router import ProviderRouter
-from ai.tool_defs import PLANNING_TOOLS
 from ai.prompts import PLANNING_PROMPT
 from ai import context as ctx
 import bot_config as cfg
@@ -70,6 +70,10 @@ class ProjectManager:
         self.searcher = searcher
         self.scheduler = scheduler
         self.base_dir = project_base_dir
+        self.planner_agent = PlannerAgent(
+            router=self.router,
+            run_agent_action=self._run_agent_action_for_planner,
+        )
 
     async def create_project(self, name: str) -> dict[str, Any]:
         """Create a new project in 'ideation' status."""
@@ -143,12 +147,13 @@ class ProjectManager:
         }]
 
         # Let the AI use planning tools (web search, file read).
-        final_text, updated_messages = await self._planning_loop(
-            messages, system_prompt,
+        final_text, updated_messages = await self.planner_agent.run_planning_conversation(
+            messages=messages,
+            system_prompt=system_prompt,
         )
 
         # Parse the JSON plan from the response.
-        plan_data = self._parse_plan_json(final_text)
+        plan_data = self.planner_agent.parse_plan_json(final_text)
         if not plan_data:
             raise ValueError(f"AI did not return valid plan JSON. Response: {final_text[:200]}")
 
@@ -342,79 +347,15 @@ class ProjectManager:
         messages: list[dict],
         system_prompt: str,
     ) -> tuple[str, list[dict]]:
-        """Run the planning conversation with optional tool use."""
-        current = list(messages)
-        for _ in range(5):  # max 5 tool rounds during planning
-            response = await self.router.chat(
-                current,
-                tools=PLANNING_TOOLS,
-                system=system_prompt,
-                max_tokens=4096,
-            )
-            # Build assistant message.
-            parts = []
-            if response.text:
-                parts.append({"type": "text", "text": response.text})
-            for tc in response.tool_calls:
-                parts.append({
-                    "type": "tool_use", "id": tc.id,
-                    "name": tc.name, "input": tc.input,
-                })
-            current.append({"role": "assistant", "content": parts or response.text})
-
-            if not response.tool_calls:
-                return response.text, current
-
-            # Execute tools.
-            tool_results = []
-            for tc in response.tool_calls:
-                if tc.name == "web_search":
-                    ok, output = await self._run_agent_action(
-                        "web_search",
-                        {
-                            "query": tc.input.get("query", ""),
-                            "num_results": tc.input.get("num_results", 5),
-                        },
-                        confirmed=True,
-                    )
-                    result = output if ok else f"Web search unavailable: {output}"
-                else:
-                    result = f"Tool '{tc.name}' not available during planning."
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "name": tc.name,
-                    "content": result,
-                })
-            current.append({"role": "user", "content": tool_results})
-
-        return response.text, current
+        """Backward-compatible wrapper for planner role."""
+        return await self.planner_agent.run_planning_conversation(
+            messages=messages,
+            system_prompt=system_prompt,
+        )
 
     def _parse_plan_json(self, text: str) -> dict[str, Any] | None:
-        """Extract JSON from AI response, handling markdown code fences."""
-        # Try parsing directly.
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-        # Try extracting from ```json ... ``` block.
-        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try finding the first { ... } block.
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-
-        return None
+        """Backward-compatible wrapper for planner parser."""
+        return self.planner_agent.parse_plan_json(text)
 
     # ------------------------------------------------------------------
     # Project bootstrap
@@ -563,6 +504,14 @@ class ProjectManager:
             stdout = (inner.get("stdout") or "").strip()
             return False, stderr or stdout or f"exit code {rc}"
         return True, (inner.get("stdout") or "").strip()
+
+    async def _run_agent_action_for_planner(
+        self,
+        action: str,
+        params: dict[str, Any],
+        confirmed: bool,
+    ) -> tuple[bool, str]:
+        return await self._run_agent_action(action, params, confirmed=confirmed)
 
     @staticmethod
     def _extract_github_url(text: str) -> str | None:

@@ -119,6 +119,90 @@ CREATE TABLE IF NOT EXISTS action_idempotency (
     PRIMARY KEY (task_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL REFERENCES projects(id),
+    task_id          INTEGER REFERENCES tasks(id),
+    agent_id         TEXT NOT NULL,
+    agent_role       TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'running',
+    started_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    heartbeat_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at      TEXT,
+    error_message    TEXT DEFAULT '',
+    metadata         TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS task_artifacts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL REFERENCES projects(id),
+    task_id          INTEGER REFERENCES tasks(id),
+    artifact_type    TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    content          TEXT DEFAULT '',
+    file_path        TEXT DEFAULT '',
+    url              TEXT DEFAULT '',
+    metadata         TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Telegram user records for persistent persona memory
+CREATE TABLE IF NOT EXISTS users (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id INTEGER NOT NULL UNIQUE,
+    username         TEXT DEFAULT '',
+    first_name       TEXT DEFAULT '',
+    last_name        TEXT DEFAULT '',
+    timezone         TEXT DEFAULT '',
+    region           TEXT DEFAULT '',
+    memory_enabled   INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS user_profile_facts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    fact_key         TEXT NOT NULL,
+    fact_value       TEXT NOT NULL,
+    source           TEXT NOT NULL DEFAULT 'chat',
+    confidence       REAL NOT NULL DEFAULT 0.5,
+    is_active        INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pref_key         TEXT NOT NULL,
+    pref_value       TEXT NOT NULL,
+    source           TEXT NOT NULL DEFAULT 'chat',
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, pref_key)
+);
+
+CREATE TABLE IF NOT EXISTS user_conversations (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role               TEXT NOT NULL,
+    content            TEXT NOT NULL,
+    chat_id            TEXT DEFAULT '',
+    telegram_message_id TEXT DEFAULT '',
+    metadata           TEXT NOT NULL DEFAULT '{}',
+    created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS memory_audit_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    action           TEXT NOT NULL,
+    target_type      TEXT NOT NULL DEFAULT '',
+    target_key       TEXT NOT NULL DEFAULT '',
+    detail           TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_ideas_project ON ideas(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
@@ -129,6 +213,14 @@ CREATE INDEX IF NOT EXISTS idx_provider_usage_lookup ON provider_usage(provider_
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_agent_role ON tasks(assigned_agent_role);
 CREATE INDEX IF NOT EXISTS idx_action_idempotency_created ON action_idempotency(created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_project ON agent_runs(project_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_task ON agent_runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_artifacts_project ON task_artifacts(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_artifacts_task ON task_artifacts(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_users_telegram ON users(telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_user_facts_user ON user_profile_facts(user_id, is_active, fact_key);
+CREATE INDEX IF NOT EXISTS idx_user_conversations_user ON user_conversations(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_audit_user ON memory_audit_log(user_id, created_at);
 """
 
 

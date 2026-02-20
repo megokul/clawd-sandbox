@@ -1,0 +1,4 @@
+interface:
+  display_name: "SKYNET Orchestration"
+  short_description: "Implement SKYNET multi-agent control-plane architecture"
+  default_prompt: "Implement SKYNET main/planner/manager/worker/archivist flows with durable memory, events, reports, and proactive loops."

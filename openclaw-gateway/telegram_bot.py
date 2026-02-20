@@ -30,6 +30,7 @@ from telegram.ext import (
     filters,
 )
 
+from agents.main_persona import MainPersonaAgent
 import bot_config as cfg
 from ai.providers.base import ToolCall
 
@@ -78,6 +79,17 @@ _CHAT_PROVIDER_ALLOWLIST = (
     if cfg.GEMINI_ONLY_MODE
     else ["gemini", "groq", "openrouter", "deepseek", "openai", "claude"]
 )
+_main_persona_agent = MainPersonaAgent()
+_NO_STORE_ONCE_MARKERS = {
+    "don't store this",
+    "do not store this",
+    "dont store this",
+}
+_NO_STORE_CHAT_MARKERS = {
+    "don't store anything from this chat",
+    "do not store anything from this chat",
+    "dont store anything from this chat",
+}
 
 
 def set_dependencies(
@@ -108,6 +120,255 @@ def _authorised(update: Update) -> bool:
         return True
     logger.warning("Rejected message from user %s", user.id if user else "unknown")
     return False
+
+
+async def _ensure_memory_user(update: Update) -> dict | None:
+    user = update.effective_user
+    if user is None or _project_manager is None:
+        return None
+    try:
+        from db import store
+
+        return await store.ensure_user(
+            _project_manager.db,
+            telegram_user_id=int(user.id),
+            username=user.username or "",
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+        )
+    except Exception:
+        logger.exception("Failed to ensure user profile record.")
+        return None
+
+
+async def _append_user_conversation(
+    update: Update,
+    *,
+    role: str,
+    content: str,
+    metadata: dict | None = None,
+) -> None:
+    if _project_manager is None:
+        return
+    user_row = await _ensure_memory_user(update)
+    if not user_row:
+        return
+    try:
+        from db import store
+
+        msg = update.message
+        await store.add_user_conversation(
+            _project_manager.db,
+            user_id=int(user_row["id"]),
+            role=role,
+            content=content,
+            chat_id=str(getattr(msg, "chat_id", "")),
+            telegram_message_id=str(getattr(msg, "message_id", "")),
+            metadata=metadata or {},
+        )
+    except Exception:
+        logger.exception("Failed to write user conversation record.")
+
+
+async def _profile_prompt_context(update: Update) -> str:
+    if _project_manager is None:
+        return ""
+    user_row = await _ensure_memory_user(update)
+    if not user_row:
+        return ""
+    try:
+        from db import store
+
+        user_id = int(user_row["id"])
+        facts = await store.list_profile_facts(_project_manager.db, user_id=user_id, active_only=True)
+        prefs = await store.get_user_preferences(_project_manager.db, user_id=user_id)
+        chunks: list[str] = []
+        if user_row.get("timezone"):
+            chunks.append(f"timezone={user_row['timezone']}")
+        if user_row.get("region"):
+            chunks.append(f"region={user_row['region']}")
+        for pref in prefs[:12]:
+            chunks.append(f"pref:{pref['pref_key']}={pref['pref_value']}")
+        for fact in facts[:16]:
+            chunks.append(f"fact:{fact['fact_key']}={fact['fact_value']}")
+        return "\n".join(chunks)
+    except Exception:
+        logger.exception("Failed to build profile prompt context.")
+        return ""
+
+
+def _extract_memory_candidates(text: str) -> tuple[list[tuple[str, str, float]], list[tuple[str, str]]]:
+    lowered = text.lower()
+    facts: list[tuple[str, str, float]] = []
+    prefs: list[tuple[str, str]] = []
+
+    name_match = re.search(r"\bmy name is\s+([A-Za-z][A-Za-z0-9 _-]{1,40})\b", text, re.IGNORECASE)
+    if name_match:
+        facts.append(("name", name_match.group(1).strip(), 0.95))
+
+    call_me = re.search(r"\bcall me\s+([A-Za-z][A-Za-z0-9 _-]{1,40})\b", text, re.IGNORECASE)
+    if call_me:
+        facts.append(("preferred_name", call_me.group(1).strip(), 0.9))
+
+    tz_match = re.search(r"\b(?:timezone is|tz is|i am in timezone)\s+([A-Za-z0-9_/\-+:.]{2,32})\b", text, re.IGNORECASE)
+    if tz_match:
+        facts.append(("timezone", tz_match.group(1).strip(), 0.9))
+    else:
+        utc_match = re.search(r"\butc\s*([+-]\d{1,2}(?::\d{2})?)\b", lowered)
+        if utc_match:
+            facts.append(("timezone", f"UTC{utc_match.group(1)}", 0.85))
+
+    region_match = re.search(r"\b(?:i live in|i am in|i'm in|based in)\s+([A-Za-z0-9 ,._-]{2,60})\b", text, re.IGNORECASE)
+    if region_match:
+        facts.append(("region", region_match.group(1).strip(" .,"), 0.75))
+
+    if "no emoji" in lowered or "no emojis" in lowered:
+        prefs.append(("tone.no_emojis", "true"))
+    if "be concise" in lowered or "short answers" in lowered:
+        prefs.append(("response.verbosity", "concise"))
+    if "be detailed" in lowered or "more detail" in lowered:
+        prefs.append(("response.verbosity", "detailed"))
+    if "no fluff" in lowered:
+        prefs.append(("tone.no_fluff", "true"))
+
+    for token, key in (
+        ("ec2", "environment.ec2"),
+        ("docker", "environment.docker"),
+        ("windows", "environment.windows"),
+        ("linux", "environment.linux"),
+    ):
+        if token in lowered:
+            facts.append((key, "true", 0.6))
+
+    return facts, prefs
+
+
+def _is_no_store_once_message(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _NO_STORE_ONCE_MARKERS)
+
+
+def _is_no_store_chat_message(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _NO_STORE_CHAT_MARKERS)
+
+
+async def _capture_profile_memory(update: Update, text: str, *, skip_store: bool) -> None:
+    if _project_manager is None:
+        return
+    user_row = await _ensure_memory_user(update)
+    if not user_row:
+        return
+
+    try:
+        from db import store
+
+        user_id = int(user_row["id"])
+        await _append_user_conversation(update, role="user", content=text)
+
+        if skip_store:
+            await store.add_memory_audit_log(
+                _project_manager.db,
+                user_id=user_id,
+                action="skip_store_once",
+                target_type="message",
+                target_key="user_text",
+                detail="User requested no-store for this message.",
+            )
+            return
+
+        if int(user_row.get("memory_enabled", 1)) != 1:
+            return
+
+        facts, prefs = _extract_memory_candidates(text)
+        for key, value, confidence in facts:
+            await store.add_or_update_profile_fact(
+                _project_manager.db,
+                user_id=user_id,
+                fact_key=key,
+                fact_value=value,
+                confidence=confidence,
+                source="telegram_text",
+            )
+            await store.add_memory_audit_log(
+                _project_manager.db,
+                user_id=user_id,
+                action="fact_upsert",
+                target_type="fact",
+                target_key=key,
+                detail=f"{key}={value}",
+            )
+            if key == "timezone":
+                await store.update_user_core_fields(_project_manager.db, user_id=user_id, timezone=value)
+            if key == "region":
+                await store.update_user_core_fields(_project_manager.db, user_id=user_id, region=value)
+
+        for pref_key, pref_value in prefs:
+            await store.upsert_user_preference(
+                _project_manager.db,
+                user_id=user_id,
+                pref_key=pref_key,
+                pref_value=pref_value,
+                source="telegram_text",
+            )
+            await store.add_memory_audit_log(
+                _project_manager.db,
+                user_id=user_id,
+                action="preference_upsert",
+                target_type="preference",
+                target_key=pref_key,
+                detail=f"{pref_key}={pref_value}",
+            )
+    except Exception:
+        logger.exception("Failed memory capture pipeline.")
+
+
+async def _format_profile_summary(update: Update) -> str:
+    if _project_manager is None:
+        return "User profile is unavailable."
+    user_row = await _ensure_memory_user(update)
+    if not user_row:
+        return "User profile is unavailable."
+
+    from db import store
+
+    user_id = int(user_row["id"])
+    facts = await store.list_profile_facts(_project_manager.db, user_id=user_id, active_only=True)
+    prefs = await store.get_user_preferences(_project_manager.db, user_id=user_id)
+
+    lines = [
+        "<b>User Profile</b>",
+        f"Memory enabled: <b>{'yes' if int(user_row.get('memory_enabled', 1)) == 1 else 'no'}</b>",
+    ]
+    if user_row.get("timezone"):
+        lines.append(f"Timezone: <code>{html.escape(str(user_row['timezone']))}</code>")
+    if user_row.get("region"):
+        lines.append(f"Region: <code>{html.escape(str(user_row['region']))}</code>")
+
+    lines.append("")
+    lines.append("<b>Facts</b>")
+    if facts:
+        for fact in facts[:20]:
+            lines.append(
+                f"- <code>{html.escape(str(fact['fact_key']))}</code>: "
+                f"{html.escape(str(fact['fact_value']))} "
+                f"(conf={float(fact.get('confidence', 0.0)):.2f})"
+            )
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    lines.append("<b>Preferences</b>")
+    if prefs:
+        for pref in prefs:
+            lines.append(
+                f"- <code>{html.escape(str(pref['pref_key']))}</code>: "
+                f"{html.escape(str(pref['pref_value']))}"
+            )
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines)
 
 
 async def _gateway_get(endpoint: str) -> dict:
@@ -328,10 +589,22 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
         except Exception:
             logger.exception("Failed to resolve project context for chat")
 
-    system_prompt = (
+    base_system_prompt = (
         f"{_CHAT_SYSTEM_PROMPT}\n\n"
         f"Working directory: {project_path}\n"
         "If you perform filesystem/git/build actions, prefer this context unless the user specifies another path."
+    )
+    if _main_persona_agent.should_delegate(text):
+        base_system_prompt += (
+            "\n\nThis looks like long-running work. "
+            "Prefer delegated execution through tools and avoid claiming completion "
+            "until tool results confirm it."
+        )
+
+    profile_context = await _profile_prompt_context(update)
+    system_prompt = _main_persona_agent.compose_system_prompt(
+        base_system_prompt,
+        profile_context=profile_context,
     )
     try:
         prompt_context = _skill_registry.get_prompt_skill_context(text, role="chat")
@@ -418,6 +691,7 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
     reply = final_text
     if not reply:
         reply = "I could not generate a reply right now."
+    reply = _main_persona_agent.compose_final_response(reply)
     if len(reply) > 3800:
         reply = reply[:3800] + "\n\n... (truncated)"
 
@@ -427,6 +701,12 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
     _trim_chat_history()
 
     await update.message.reply_text(reply)
+    await _append_user_conversation(
+        update,
+        role="assistant",
+        content=reply,
+        metadata={"channel": "openclaw_capabilities"},
+    )
 
 
 async def _reply_naturally_fallback(update: Update, text: str) -> None:
@@ -436,18 +716,28 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
         return
 
     history = _chat_history[-(_CHAT_HISTORY_MAX * 2):]
-    system_prompt = _CHAT_SYSTEM_PROMPT
+    base_system_prompt = _CHAT_SYSTEM_PROMPT
+    if _main_persona_agent.should_delegate(text):
+        base_system_prompt += (
+            "\n\nThis looks like long-running work. "
+            "Do not pretend it is completed in chat; provide a concise delegated plan."
+        )
     if _skill_registry:
         try:
             prompt_context = _skill_registry.get_prompt_skill_context(text, role="chat")
             if prompt_context:
-                system_prompt += (
+                base_system_prompt += (
                     "\n\n[External Skill Guidance]\n"
                     "Use the following skill guidance if relevant:\n\n"
                     f"{prompt_context}"
                 )
         except Exception:
             logger.exception("Failed to inject external skill guidance into fallback chat")
+    profile_context = await _profile_prompt_context(update)
+    system_prompt = _main_persona_agent.compose_system_prompt(
+        base_system_prompt,
+        profile_context=profile_context,
+    )
 
     messages = [*history, {"role": "user", "content": text}]
     try:
@@ -464,10 +754,17 @@ async def _reply_naturally_fallback(update: Update, text: str) -> None:
         return
 
     reply = (response.text or "").strip() or "I could not generate a reply right now."
+    reply = _main_persona_agent.compose_final_response(reply)
     _chat_history.append({"role": "user", "content": text})
     _chat_history.append({"role": "assistant", "content": reply})
     _trim_chat_history()
     await update.message.reply_text(reply)
+    await _append_user_conversation(
+        update,
+        role="assistant",
+        content=reply,
+        metadata={"channel": "fallback"},
+    )
 
 
 async def _capture_idea(update: Update, text: str) -> None:
@@ -1601,6 +1898,142 @@ async def cmd_quota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ------------------------------------------------------------------
+# Persona memory commands
+# ------------------------------------------------------------------
+
+async def _forget_profile_target(update: Update, target: str) -> str:
+    if _project_manager is None:
+        return "Profile store is not available."
+    user_row = await _ensure_memory_user(update)
+    if not user_row:
+        return "Profile store is not available."
+
+    from db import store
+
+    user_id = int(user_row["id"])
+    removed = await store.forget_profile_facts(
+        _project_manager.db,
+        user_id=user_id,
+        key_or_text=target,
+    )
+    await store.add_memory_audit_log(
+        _project_manager.db,
+        user_id=user_id,
+        action="forget",
+        target_type="fact",
+        target_key=target,
+        detail=f"Removed facts: {removed}",
+    )
+    if removed <= 0:
+        return f"No stored facts matched '{target}'."
+    return f"Forgot {removed} fact(s) matching '{target}'."
+
+
+async def _set_memory_enabled_for_user(update: Update, enabled: bool, *, reason: str) -> str:
+    if _project_manager is None:
+        return "Profile store is not available."
+    user_row = await _ensure_memory_user(update)
+    if not user_row:
+        return "Profile store is not available."
+
+    from db import store
+
+    user_id = int(user_row["id"])
+    await store.set_user_memory_enabled(_project_manager.db, user_id=user_id, enabled=enabled)
+    await store.add_memory_audit_log(
+        _project_manager.db,
+        user_id=user_id,
+        action="memory_enabled" if enabled else "memory_disabled",
+        target_type="policy",
+        target_key="memory_enabled",
+        detail=reason,
+    )
+    if enabled:
+        return "Memory capture enabled."
+    return "Memory capture disabled for this user. Use /store_on to re-enable."
+
+
+async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    try:
+        summary = await _format_profile_summary(update)
+        await update.message.reply_text(summary, parse_mode="HTML")
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /forget <fact key or text>")
+        return
+    target = " ".join(context.args).strip()
+    try:
+        await update.message.reply_text(await _forget_profile_target(update, target))
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_no_store(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    try:
+        await update.message.reply_text(
+            await _set_memory_enabled_for_user(
+                update,
+                enabled=False,
+                reason="Disabled by user command.",
+            )
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_store_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    try:
+        await update.message.reply_text(
+            await _set_memory_enabled_for_user(
+                update,
+                enabled=True,
+                reason="Enabled by user command.",
+            )
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def _maybe_handle_memory_text_command(update: Update, text: str) -> bool:
+    lowered = text.strip().lower()
+
+    if lowered in {"show my profile", "show profile", "what do you know about me"}:
+        summary = await _format_profile_summary(update)
+        await update.message.reply_text(summary, parse_mode="HTML")
+        return True
+
+    if lowered.startswith("forget "):
+        target = text.strip()[7:].strip()
+        if target:
+            await update.message.reply_text(await _forget_profile_target(update, target))
+            return True
+
+    if _is_no_store_chat_message(text):
+        await update.message.reply_text(
+            await _set_memory_enabled_for_user(
+                update,
+                enabled=False,
+                reason="Disabled by natural-language request.",
+            )
+        )
+        return True
+
+    return False
+
+
+# ------------------------------------------------------------------
 # v1 Agent commands (kept as-is)
 # ------------------------------------------------------------------
 
@@ -1608,37 +2041,42 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorised(update):
         return
     await update.message.reply_text(
-        "<b>SKYNET // CHATHAN — AI Project Factory</b>\n\n"
+        "<b>SKYNET // CHATHAN - AI Project Factory</b>\n\n"
         "<b>Project Management:</b>\n"
-        "  /newproject &lt;name&gt; — start a new project\n"
-        "  (send text) — natural chat with SKYNET\n"
-        "  /idea &lt;text&gt; — add idea to current project\n"
-        "  /plan [name] — generate project plan\n"
-        "  /projects — list all projects\n"
-        "  /status &lt;name&gt; — project status\n"
-        "  /pause &lt;name&gt; — pause project\n"
-        "  /resume_project &lt;name&gt; — resume project\n"
-        "  /cancel &lt;name&gt; — cancel project\n"
-        "  /quota — AI provider status\n\n"
+        "  /newproject &lt;name&gt; - start a new project\n"
+        "  (send text) - natural chat with SKYNET\n"
+        "  /idea &lt;text&gt; - add idea to current project\n"
+        "  /plan [name] - generate project plan\n"
+        "  /projects - list all projects\n"
+        "  /status &lt;name&gt; - project status\n"
+        "  /pause &lt;name&gt; - pause project\n"
+        "  /resume_project &lt;name&gt; - resume project\n"
+        "  /cancel &lt;name&gt; - cancel project\n"
+        "  /quota - AI provider status\n\n"
+        "<b>Persona Memory:</b>\n"
+        "  /profile - show stored profile and preferences\n"
+        "  /forget &lt;fact-or-text&gt; - forget matching stored facts\n"
+        "  /no_store - stop storing new memory\n"
+        "  /store_on - re-enable memory storage\n\n"
         "<b>SKYNET System:</b>\n"
-        "  /agents [project] — list agents\n"
-        "  /heartbeat — heartbeat task status\n"
-        "  /sentinel — run health checks\n"
-        "  /skills — list available skills\n\n"
+        "  /agents [project] - list agents\n"
+        "  /heartbeat - heartbeat task status\n"
+        "  /sentinel - run health checks\n"
+        "  /skills - list available skills\n\n"
         "<b>Agent Commands:</b>\n"
-        "  /agent_status — agent connection check\n"
+        "  /agent_status - agent connection check\n"
         "  /git_status [path]\n"
         "  /run_tests [path]\n"
         "  /lint [path]\n"
         "  /build [path]\n"
-        "  /vscode <path> â€” open folder/file in VS Code on laptop\n"
-        "  /check_agents â€” check codex/claude/cline CLI availability\n"
-        "  /run_agent <agent> [path=<dir>] <prompt> â€” run coding agent\n"
-        "  /cline_provider <provider> [model] â€” switch Cline provider/model\n"
+        "  /vscode <path> - open folder/file in VS Code on laptop\n"
+        "  /check_agents - check codex/claude/cline CLI availability\n"
+        "  /run_agent <agent> [path=<dir>] <prompt> - run coding agent\n"
+        "  /cline_provider <provider> [model] - switch Cline provider/model\n"
         "  /close_app [name]\n\n"
         "<b>Controls:</b>\n"
-        "  /emergency_stop — kill everything\n"
-        "  /resume — resume agent\n",
+        "  /emergency_stop - kill everything\n"
+        "  /resume - resume agent\n",
         parse_mode="HTML",
     )
 
@@ -2006,6 +2444,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not text:
         return
 
+    if await _maybe_handle_memory_text_command(update, text):
+        return
+
+    skip_store = _is_no_store_once_message(text)
+    await _capture_profile_memory(update, text, skip_store=skip_store)
+
     # Optional explicit idea prefix while in chat mode.
     if text.lower().startswith("idea:"):
         idea_text = text[5:].strip()
@@ -2046,6 +2490,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("resume_project", cmd_resume_project))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("quota", cmd_quota))
+    app.add_handler(CommandHandler("profile", cmd_profile))
+    app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(CommandHandler("no_store", cmd_no_store))
+    app.add_handler(CommandHandler("store_on", cmd_store_on))
 
     # SKYNET system commands.
     app.add_handler(CommandHandler("agents", cmd_agents))
@@ -2077,5 +2525,6 @@ def build_app() -> Application:
 
     _bot_app = app
     return app
+
 
 
