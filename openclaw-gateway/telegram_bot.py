@@ -18,6 +18,7 @@ import logging
 import html
 import re
 import uuid
+import time
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ _approval_counter: int = 0
 _pending_project_name_requests: dict[int, dict[str, str]] = {}
 # Stores pending project documentation intake by user id.
 _pending_project_doc_intake: dict[int, dict[str, Any]] = {}
+_background_tasks: set[asyncio.Task] = set()
 
 _PROJECT_DOC_INTAKE_STEPS: list[tuple[str, str]] = [
     ("problem", "What problem are we solving with this project?"),
@@ -554,6 +556,21 @@ def _trim_chat_history() -> None:
     max_items = _CHAT_HISTORY_MAX * 2
     if len(_chat_history) > max_items:
         _chat_history = _chat_history[-max_items:]
+
+
+def _spawn_background_task(coro, *, tag: str) -> None:
+    """Run a coroutine in background and surface failures in logs."""
+    task = asyncio.create_task(coro, name=tag)
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        try:
+            t.result()
+        except Exception:
+            logger.exception("Background task failed: %s", tag)
+
+    task.add_done_callback(_done)
 
 
 def _build_assistant_content(response) -> object:
@@ -1597,7 +1614,32 @@ async def _write_initial_project_docs(project: dict, answers: dict[str, str]) ->
     return True, ""
 
 
-async def _finalize_project_doc_intake(update: Update, state: dict[str, Any]) -> None:
+async def _run_project_docs_generation_async(
+    project: dict,
+    answers: dict[str, str],
+    *,
+    reason: str,
+) -> None:
+    start = time.monotonic()
+    ok, note = await _write_initial_project_docs(project, answers)
+    elapsed = round(time.monotonic() - start, 1)
+    name = _project_display(project)
+    if ok:
+        msg = (
+            f"Documentation update complete for '{name}' ({reason}) in {elapsed}s.\n"
+            f"Template root: {_join_project_path(project.get('local_path', ''), 'docs')}"
+        )
+        if note:
+            msg += f"\nNote: {note}"
+    else:
+        msg = (
+            f"Documentation update failed for '{name}' ({reason}) after {elapsed}s.\n"
+            f"Error: {note}"
+        )
+    await _send_to_user(msg)
+
+
+async def _finalize_project_doc_intake(update: Update | None, state: dict[str, Any]) -> None:
     if _project_manager is None:
         return
     try:
@@ -1609,7 +1651,10 @@ async def _finalize_project_doc_intake(update: Update, state: dict[str, Any]) ->
         project = None
 
     if not project:
-        await update.message.reply_text("I could not load the project to finalize documentation intake.")
+        if update and update.message:
+            await update.message.reply_text("I could not load the project to finalize documentation intake.")
+        else:
+            await _send_to_user("I could not load the project to finalize documentation intake.")
         return
 
     answers = dict(state.get("answers") or {})
@@ -1620,24 +1665,14 @@ async def _finalize_project_doc_intake(update: Update, state: dict[str, Any]) ->
     except Exception:
         logger.exception("Failed adding documentation intake as idea.")
 
-    wrote_docs, err = await _write_initial_project_docs(project, answers)
-    if wrote_docs:
-        note_line = f"\nNote: {err}" if err else ""
-        await update.message.reply_text(
-            (
-                f"Initial documentation created for '{_project_display(project)}' "
-                f"using the finalized template at {_join_project_path(project.get('local_path', ''), 'docs')}."
-                + (f"\nCaptured as idea #{idea_count}." if idea_count else "")
-                + note_line
-            )
-        )
-    else:
-        await update.message.reply_text(
-            (
-                f"I captured the documentation intake for '{_project_display(project)}'"
-                + (f" as idea #{idea_count}" if idea_count else "")
-                + f", but could not write docs files yet: {err}"
-            )
+    await _run_project_docs_generation_async(
+        project,
+        answers,
+        reason="intake_finalize",
+    )
+    if idea_count:
+        await _send_to_user(
+            f"Captured documentation intake as idea #{idea_count} for '{_project_display(project)}'."
         )
 
 
@@ -1710,8 +1745,14 @@ async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
         return True
 
     _pending_project_doc_intake.pop(key, None)
-    await update.message.reply_text("Great. Finalizing initial documentation now...")
-    await _finalize_project_doc_intake(update, state)
+    await update.message.reply_text(
+        "Great. Generating comprehensive documentation now (this may take 1-3 minutes). "
+        "I will notify you when it is done."
+    )
+    _spawn_background_task(
+        _finalize_project_doc_intake(None, state),
+        tag=f"doc-intake-finalize-{state.get('project_id', 'unknown')}",
+    )
     return True
 
 
@@ -2702,7 +2743,6 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
     try:
         project = await _project_manager.create_project(name)
         _last_project_id = project["id"]
-        docs_ok, docs_err = await _write_initial_project_docs(project, {})
         repo_line = (
             f"\nGitHub: {project.get('github_repo')}"
             if project.get("github_repo") else ""
@@ -2710,13 +2750,10 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
         bootstrap_note = _project_bootstrap_note(project)
         if bootstrap_note:
             bootstrap_note = "\n" + bootstrap_note
-        if docs_ok:
-            docs_note = (
-                "\nDocumentation: finalized template initialized with comprehensive LLM-generated content."
-                + (f"\nNote: {docs_err}" if docs_err else "")
-            )
-        else:
-            docs_note = f"\nDocumentation warning: initialization failed ({docs_err})."
+        docs_note = (
+            "\nDocumentation: generation started in background using the finalized template. "
+            "I will notify you when it completes."
+        )
         await update.message.reply_text(
             (
                 f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}\n"
@@ -2724,6 +2761,10 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
                 f"{docs_note}\n"
                 "Share details naturally. Once details are enough, I can auto-plan and execute."
             )
+        )
+        _spawn_background_task(
+            _run_project_docs_generation_async(project, {}, reason="project_create"),
+            tag=f"doc-init-{project['id']}",
         )
         await _start_project_documentation_intake(update, project)
         return True
