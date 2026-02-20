@@ -3603,6 +3603,49 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
     if _is_smalltalk_or_ack(text):
         return False
 
+    intent_data = await _extract_nl_intent_hybrid(text, update=update)
+    intent = str(intent_data.get("intent", "")).strip() if intent_data else ""
+
+    if intent == "create_project" and intent_data.get("project_name"):
+        if _is_existing_project_reference_phrase(intent_data.get("project_name", "")):
+            _pending_project_name_requests.pop(key, None)
+            project, error = await _resolve_project()
+            if error:
+                await update.message.reply_text(error)
+            else:
+                await update.message.reply_text(
+                    f"Continuing with '{_project_display(project)}'. Share the app details and I will proceed."
+                )
+            return True
+        _pending_project_name_requests.pop(key, None)
+        return await _create_project_from_name(update, intent_data["project_name"])
+
+    # If the user moved to another actionable request, release "pending name"
+    # and let normal intent handling continue.
+    non_name_intents = {
+        "help",
+        "list_projects",
+        "project_status",
+        "generate_plan",
+        "approve_and_start",
+        "pause_project",
+        "resume_project",
+        "cancel_project",
+        "remove_project",
+        "add_idea",
+        "open_in_vscode",
+    }
+    if intent in non_name_intents:
+        _pending_project_name_requests.pop(key, None)
+        return False
+
+    # Keep waiting for project name if user asks runtime/tool actions.
+    if intent in {"run_coding_agent", "configure_coding_agent", "check_coding_agents"}:
+        await update.message.reply_text(
+            "Before we continue, what should I name the project? (or say 'cancel')",
+        )
+        return True
+
     candidate = _extract_project_name_candidate(text)
     if candidate:
         _pending_project_name_requests.pop(key, None)
@@ -3643,31 +3686,6 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
     if lowered in {"cancel", "cancel it", "never mind", "nevermind", "forget it"}:
         _pending_project_name_requests.pop(key, None)
         await update.message.reply_text("Okay, cancelled project creation.")
-        return True
-
-    intent_data = await _extract_nl_intent_hybrid(text, update=update)
-    if intent_data and intent_data.get("intent") == "create_project" and intent_data.get("project_name"):
-        if _is_existing_project_reference_phrase(intent_data.get("project_name", "")):
-            _pending_project_name_requests.pop(key, None)
-            project, error = await _resolve_project()
-            if error:
-                await update.message.reply_text(error)
-            else:
-                await update.message.reply_text(
-                    f"Continuing with '{_project_display(project)}'. Share the app details and I will proceed."
-                )
-            return True
-        _pending_project_name_requests.pop(key, None)
-        return await _create_project_from_name(update, intent_data["project_name"])
-
-    if intent_data and intent_data.get("intent") in {"help", "list_projects", "project_status"}:
-        _pending_project_name_requests.pop(key, None)
-        return False
-
-    if intent_data and intent_data.get("intent") in {"run_coding_agent", "configure_coding_agent", "check_coding_agents"}:
-        await update.message.reply_text(
-            "Before we continue, what should I name the project? (or say 'cancel')",
-        )
         return True
 
     if not candidate:
