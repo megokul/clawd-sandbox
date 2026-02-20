@@ -69,6 +69,7 @@ _PROJECT_DOC_INTAKE_STEPS: list[tuple[str, str]] = [
     ("success_metrics", "How will we measure success?"),
     ("tech_stack", "Any preferred tech stack or constraints (language/framework/runtime)?"),
 ]
+_DOC_INTAKE_FIELDS: tuple[str, ...] = tuple(field for field, _ in _PROJECT_DOC_INTAKE_STEPS)
 
 _DOC_INTAKE_FIELD_LIMITS: dict[str, int] = {
     "problem": 1500,
@@ -1013,11 +1014,11 @@ async def _smalltalk_reply_with_context(update: Update, text: str) -> str:
             return base + " I am waiting for the project name. Reply with the name only, or say 'cancel'."
         intake = _pending_project_doc_intake.get(key)
         if intake:
-            idx = int(intake.get("step_index", 0))
-            total = len(_PROJECT_DOC_INTAKE_STEPS)
-            if 0 <= idx < total:
-                q = _PROJECT_DOC_INTAKE_STEPS[idx][1]
-                return base + f" Let's continue the project documentation intake. Q{idx + 1}/{total}: {q}"
+            answers = dict(intake.get("answers") or {})
+            turn_count = int(intake.get("turn_count", 0))
+            project_name = str(intake.get("project_name") or "this project")
+            q = _compose_dynamic_intake_followup(project_name, answers, turn_count)
+            return base + " Let's continue the project documentation intake. " + q
 
     if _project_manager is None or not _last_project_id:
         return base
@@ -1266,6 +1267,199 @@ def _sanitize_markdown_document(value: str, *, max_chars: int = 50000) -> str:
         text += "\n"
     return text
 
+
+def _merge_intake_value(existing: str, new_value: str, *, max_chars: int = 2000) -> str:
+    old = _sanitize_intake_text(existing, max_chars=max_chars)
+    new = _sanitize_intake_text(new_value, max_chars=max_chars)
+    if not new:
+        return old
+    if not old:
+        return new
+
+    old_parts = [p.strip() for p in re.split(r"\n+", old) if p.strip()]
+    key_set = {re.sub(r"\s+", " ", p.lower()) for p in old_parts}
+    for part in [p.strip() for p in re.split(r"\n+", new) if p.strip()]:
+        key = re.sub(r"\s+", " ", part.lower())
+        if key and key not in key_set:
+            old_parts.append(part)
+            key_set.add(key)
+    merged = "\n".join(old_parts).strip()
+    if len(merged) > max_chars:
+        merged = merged[:max_chars].rstrip()
+    return merged
+
+
+def _heuristic_intake_extract(text: str) -> dict[str, str]:
+    raw = (text or "").strip()
+    lowered = raw.lower()
+    out: dict[str, str] = {}
+
+    tech_hits: list[str] = []
+    tech_terms = (
+        "python", "fastapi", "flask", "django", "streamlit", "tkinter",
+        "react", "node", "sqlite", "postgres", "docker", "windows", "linux",
+        "telegram", "desktop app", "web app",
+    )
+    for term in tech_terms:
+        if term in lowered:
+            tech_hits.append(term)
+    if tech_hits:
+        out["tech_stack"] = ", ".join(dict.fromkeys(tech_hits))
+
+    if re.search(r"\b(will|should|must|when|on click|upon click|clicked|display|popup|pop up|beep|sound)\b", lowered):
+        out["requirements"] = raw
+
+    user_match = re.search(r"\b(?:for|used by|users are|target users are)\s+(.+)$", raw, flags=re.IGNORECASE)
+    if user_match and len(user_match.group(1).strip()) >= 3:
+        out["users"] = user_match.group(1).strip()
+
+    if re.search(r"\b(problem|pain|issue|need|goal is|objective is|so that)\b", lowered):
+        out["problem"] = raw
+
+    if re.search(r"\b(out of scope|non-goal|won't|will not|not doing|exclude)\b", lowered):
+        out["non_goals"] = raw
+
+    if re.search(r"\b(success|done when|measure|metric|acceptance)\b", lowered):
+        out["success_metrics"] = raw
+
+    return out
+
+
+async def _llm_intake_extract(
+    project_name: str,
+    text: str,
+    current_answers: dict[str, str],
+) -> dict[str, str]:
+    if _provider_router is None:
+        return {}
+    payload = {
+        "project_name": project_name,
+        "message": text,
+        "current_answers": current_answers,
+        "fields": list(_DOC_INTAKE_FIELDS),
+        "instruction": (
+            "Extract all relevant fields from this single message. "
+            "If a field is not present, return empty string. "
+            "Do not invent facts."
+        ),
+    }
+    system = (
+        "You extract structured project documentation signals from a natural language message. "
+        "Return ONLY JSON object with keys: "
+        "problem, users, requirements, non_goals, success_metrics, tech_stack. "
+        "Values must be short plain text strings."
+    )
+    try:
+        response = await _provider_router.chat(
+            [{"role": "user", "content": json.dumps(payload)}],
+            system=system,
+            max_tokens=450,
+            task_type="planning",
+            preferred_provider="groq",
+            allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
+        )
+    except Exception:
+        return {}
+    obj = _extract_json_object(response.text or "")
+    if not isinstance(obj, dict):
+        return {}
+    out: dict[str, str] = {}
+    for field in _DOC_INTAKE_FIELDS:
+        value = _sanitize_intake_text(str(obj.get(field, "")), max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200))
+        if value:
+            out[field] = value
+    return out
+
+
+async def _extract_intake_signals(
+    project_name: str,
+    text: str,
+    current_answers: dict[str, str],
+) -> dict[str, str]:
+    signals = _heuristic_intake_extract(text)
+    llm_signals = await _llm_intake_extract(project_name, text, current_answers)
+    for field in _DOC_INTAKE_FIELDS:
+        cur = signals.get(field, "")
+        nxt = llm_signals.get(field, "")
+        if nxt:
+            signals[field] = _merge_intake_value(cur, nxt, max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200))
+    return signals
+
+
+def _missing_intake_fields(answers: dict[str, str]) -> list[str]:
+    missing: list[str] = []
+    for field in _DOC_INTAKE_FIELDS:
+        if not _sanitize_intake_text(str(answers.get(field, "")), max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200)):
+            missing.append(field)
+    return missing
+
+
+def _doc_intake_done_signal(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    done_phrases = {
+        "done", "thats all", "that's all", "enough", "proceed", "continue", "go ahead",
+        "start building", "build it", "generate docs", "finalize docs", "looks good",
+    }
+    return lowered in done_phrases or any(phrase in lowered for phrase in done_phrases)
+
+
+def _intake_has_enough_context(answers: dict[str, str], turn_count: int, done_signal: bool) -> bool:
+    filled = len(_DOC_INTAKE_FIELDS) - len(_missing_intake_fields(answers))
+    if done_signal and filled >= 3:
+        return True
+    if filled >= 5 and turn_count >= 2:
+        return True
+    if filled >= 4 and turn_count >= 3:
+        return True
+    return False
+
+
+def _compose_dynamic_intake_followup(project_name: str, answers: dict[str, str], turn_count: int) -> str:
+    missing = _missing_intake_fields(answers)
+    if not missing:
+        return "I have enough context. I will finalize the documentation now."
+
+    next_field = missing[0]
+    requirements_known = bool(_sanitize_intake_text(str(answers.get("requirements", ""))))
+    tech_known = bool(_sanitize_intake_text(str(answers.get("tech_stack", ""))))
+
+    question_map: dict[str, list[str]] = {
+        "problem": [
+            f"What core problem should '{project_name}' solve for users?",
+            "What should improve for users after using this app?",
+        ],
+        "users": [
+            "Who will actually use this first: only you, a team, or public users?",
+            "Who is the primary user persona for this first version?",
+        ],
+        "requirements": [
+            "What exact behavior should the first version implement end-to-end?",
+            "What should happen step-by-step in the user flow?",
+        ],
+        "non_goals": [
+            "What should we explicitly avoid in v1 so scope stays tight?",
+            "Anything you do not want included in this first release?",
+        ],
+        "success_metrics": [
+            "How should we measure that v1 is successful?",
+            "What acceptance criteria should mark this as done?",
+        ],
+        "tech_stack": [
+            "Any constraints on language/framework/runtime or packaging?",
+            "Do you want to lock a specific stack, or should I choose a pragmatic default?",
+        ],
+    }
+
+    if next_field == "users" and requirements_known:
+        prompt = "I captured the feature direction. "
+    elif next_field == "tech_stack" and not tech_known and requirements_known:
+        prompt = "Feature scope is clear. "
+    else:
+        prompt = ""
+
+    options = question_map.get(next_field, ["Tell me one more key detail about the project."])
+    followup = options[turn_count % len(options)]
+    return f"{prompt}{followup}"
 
 def _normalize_doc_relpath(path: str) -> str:
     return re.sub(r"/{2,}", "/", (path or "").strip().replace("\\", "/")).strip("/")
@@ -1682,16 +1876,16 @@ async def _start_project_documentation_intake(update: Update, project: dict) -> 
         return
     _pending_project_doc_intake[key] = {
         "project_id": project["id"],
-        "step_index": 0,
+        "project_name": _project_display(project),
+        "turn_count": 0,
         "answers": {},
     }
-    first_q = _PROJECT_DOC_INTAKE_STEPS[0][1]
     await update.message.reply_text(
         (
             f"Starting skynet-project-documentation intake for '{_project_display(project)}'.\n"
-            "Reply naturally; I will turn this into initial docs. "
-            "Say 'skip docs' any time to stop.\n\n"
-            f"Q1/{len(_PROJECT_DOC_INTAKE_STEPS)}: {first_q}"
+            "Reply naturally in any format. I will extract details across problem, users, scope, success metrics, and technical constraints.\n"
+            "You can say 'skip docs' to stop or 'proceed' when you feel context is enough.\n\n"
+            "Tell me what you want this project to do in v1."
         )
     )
 
@@ -1723,36 +1917,38 @@ async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
         await update.message.reply_text("Skipped documentation intake. Say 'resume docs intake' to continue later.")
         return True
 
-    idx = int(state.get("step_index", 0))
-    if idx < 0 or idx >= len(_PROJECT_DOC_INTAKE_STEPS):
-        _pending_project_doc_intake.pop(key, None)
-        return False
-
-    field, _question = _PROJECT_DOC_INTAKE_STEPS[idx]
     answers = dict(state.get("answers") or {})
-    answers[field] = _sanitize_intake_text(
-        (text or ""),
-        max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200),
-    )
-    idx += 1
-    state["step_index"] = idx
+    project_name = str(state.get("project_name") or "project")
+    extracted = await _extract_intake_signals(project_name, text, answers)
+    for field in _DOC_INTAKE_FIELDS:
+        if field not in extracted:
+            continue
+        current = str(answers.get(field, ""))
+        answers[field] = _merge_intake_value(
+            current,
+            extracted[field],
+            max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200),
+        )
+
+    turn_count = int(state.get("turn_count", 0)) + 1
+    state["turn_count"] = turn_count
     state["answers"] = answers
     _pending_project_doc_intake[key] = state
 
-    if idx < len(_PROJECT_DOC_INTAKE_STEPS):
-        next_q = _PROJECT_DOC_INTAKE_STEPS[idx][1]
-        await update.message.reply_text(f"Q{idx + 1}/{len(_PROJECT_DOC_INTAKE_STEPS)}: {next_q}")
+    done_signal = _doc_intake_done_signal(text)
+    if _intake_has_enough_context(answers, turn_count, done_signal):
+        _pending_project_doc_intake.pop(key, None)
+        await update.message.reply_text(
+            "Great, I have enough context. I will finalize detailed documentation now and notify you when it is done."
+        )
+        _spawn_background_task(
+            _finalize_project_doc_intake(None, state),
+            tag=f"doc-intake-finalize-{state.get('project_id', 'unknown')}",
+        )
         return True
 
-    _pending_project_doc_intake.pop(key, None)
-    await update.message.reply_text(
-        "Great. Generating comprehensive documentation now (this may take 1-3 minutes). "
-        "I will notify you when it is done."
-    )
-    _spawn_background_task(
-        _finalize_project_doc_intake(None, state),
-        tag=f"doc-intake-finalize-{state.get('project_id', 'unknown')}",
-    )
+    followup = _compose_dynamic_intake_followup(project_name, answers, turn_count)
+    await update.message.reply_text(followup)
     return True
 
 
