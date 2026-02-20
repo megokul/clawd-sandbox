@@ -1466,6 +1466,28 @@ def _doc_intake_opt_out_requested(text: str) -> bool:
         return True
 
     if re.search(
+        r"\bno\b.{0,24}\b(?:docs?|documentation|documen\w*|prd|write[- ]?up|writeup)\b"
+        r".{0,24}\b(?:needed|required)\b",
+        lowered,
+    ):
+        return True
+
+    if re.search(
+        r"\b(?:without|avoid)\b.{0,30}\b(?:docs?|documentation|documen\w*|prd)\b",
+        lowered,
+    ):
+        return True
+
+    if re.search(
+        r"\b(?:just|only)\b.{0,30}\b(?:build|make|create|implement)\b.{0,80}\b(?:app|project|application)\b",
+        lowered,
+    ) and re.search(
+        r"\b(?:no|without|dont|don't|do\s*not)\b.{0,30}\b(?:docs?|documentation|documen\w*|prd)\b",
+        lowered,
+    ):
+        return True
+
+    if re.search(
         r"\b(?:simple|basic|tiny)\s+(?:app|project)\b",
         lowered,
     ) and re.search(
