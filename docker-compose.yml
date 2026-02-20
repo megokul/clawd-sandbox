@@ -31,6 +31,7 @@ services:
       context: ./openclaw-gateway
       dockerfile: Dockerfile
     container_name: openclaw-gateway
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     ports:
       - "8765:8765"  # WebSocket
     expose:

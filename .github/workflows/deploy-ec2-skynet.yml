@@ -88,6 +88,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Repair workspace permissions
+        shell: bash
+        run: |
+          # Self-hosted runs can leave root-owned bind-mount artifacts (for example .remote-cache).
+          # Normalize ownership so git clean/reset and subsequent checkout operations stay reliable.
+          if command -v sudo >/dev/null 2>&1; then
+            sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" || true
+          rm -rf "$GITHUB_WORKSPACE/openclaw-gateway/external-skills/.remote-cache" || true
+          git reset --hard
+          git clean -ffdx
+
+      - name: Capture runner uid/gid
+        shell: bash
+        run: |
+          echo "LOCAL_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "LOCAL_GID=$(id -g)" >> "$GITHUB_ENV"
 
       - name: Validate required secrets
         shell: bash
@@ -178,6 +199,8 @@ jobs:
             printf 'OPENCLAW_SSH_CODEX_BIN=%s\n' "${OPENCLAW_SSH_CODEX_BIN:-codex}"
             printf 'OPENCLAW_SSH_CLAUDE_BIN=%s\n' "${OPENCLAW_SSH_CLAUDE_BIN:-claude}"
             printf 'OPENCLAW_SSH_CLINE_BIN=%s\n' "${OPENCLAW_SSH_CLINE_BIN:-cline}"
+            printf 'LOCAL_UID=%s\n' "${LOCAL_UID:-1000}"
+            printf 'LOCAL_GID=%s\n' "${LOCAL_GID:-1000}"
           } > .env.ci
           chmod 600 .env.ci
 
