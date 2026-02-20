@@ -57,6 +57,8 @@ _pending_approvals: dict[str, asyncio.Future] = {}
 _approval_counter: int = 0
 # Stores pending natural-language follow-up for project-name capture by user id.
 _pending_project_name_requests: dict[int, dict[str, str]] = {}
+# Stores pending destructive remove-project confirmations.
+_pending_project_removals: dict[str, dict[str, str]] = {}
 # Stores pending project documentation intake by user id.
 _pending_project_doc_intake: dict[int, dict[str, Any]] = {}
 _background_tasks: set[asyncio.Task] = set()
@@ -538,6 +540,35 @@ async def _ask_confirm(update: Update, action: str, params: dict, summary: str) 
     await update.message.reply_text(
         f"<b>CONFIRM</b> -- {html.escape(action)}\n{summary}\n\nApprove this action?",
         parse_mode="HTML", reply_markup=keyboard,
+    )
+
+
+def _store_pending_project_removal(project: dict[str, Any]) -> str:
+    key = f"rp{uuid.uuid4().hex[:10]}"
+    _pending_project_removals[key] = {
+        "project_id": str(project.get("id", "")),
+        "display_name": _project_display(project),
+    }
+    if project.get("local_path"):
+        _pending_project_removals[key]["local_path"] = str(project["local_path"])
+    return key
+
+
+async def _ask_remove_project_confirmation(update: Update, project: dict[str, Any]) -> None:
+    key = _store_pending_project_removal(project)
+    display = html.escape(_project_display(project))
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Yes", callback_data=f"confirm_remove_project:{key}"),
+        InlineKeyboardButton("No", callback_data=f"cancel_remove_project:{key}"),
+    ]])
+    await update.message.reply_text(
+        (
+            f"Remove project <b>{display}</b> permanently from SKYNET records?\n"
+            "This deletes its tasks/ideas/plans/history from the DB. "
+            "Workspace files are not deleted."
+        ),
+        parse_mode="HTML",
+        reply_markup=keyboard,
     )
 
 
@@ -2344,7 +2375,7 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
             return {"intent": "project_status", "project_name": _clean_entity(match.group("project"))}
         return {"intent": "project_status"}
 
-    # Pause / resume / cancel
+    # Pause / resume / cancel / remove
     match = re.search(r"\bpause(?:\s+(?:project\s+)?)?(?P<project>.+)$", raw, flags=re.IGNORECASE)
     if match:
         return {"intent": "pause_project", "project_name": _clean_entity(match.group("project"))}
@@ -2355,6 +2386,19 @@ def _extract_nl_intent(text: str) -> dict[str, str]:
     )
     if match:
         return {"intent": "resume_project", "project_name": _clean_entity(match.group("project"))}
+    if re.search(r"\b(?:remove|delete|drop)\b.*\bproject\b", lowered):
+        match = re.search(
+            r"\b(?:remove|delete|drop)\s+(?:the\s+)?project"
+            r"(?:\s+(?:named|called))?(?:\s*[:-]\s*|\s+)?(?P<project>.*)$",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        out: dict[str, str] = {"intent": "remove_project"}
+        if match:
+            project_name = _clean_entity(match.group("project") or "")
+            if project_name:
+                out["project_name"] = project_name
+        return out
     match = re.search(
         r"\b(?:cancel|stop)\s+(?:project\s+)?(?P<project>.+)$",
         raw,
@@ -2472,6 +2516,7 @@ _ALLOWED_NL_INTENTS = {
     "pause_project",
     "resume_project",
     "cancel_project",
+    "remove_project",
     "project_status",
 }
 
@@ -2567,12 +2612,13 @@ async def _extract_nl_intent_llm(text: str, update: Update | None = None) -> dic
         "Intent must be one of: none, help, check_coding_agents, open_in_vscode, "
         "run_coding_agent, configure_coding_agent, create_project, list_projects, "
         "add_idea, generate_plan, approve_and_start, pause_project, resume_project, "
-        "cancel_project, project_status.\n"
+        "cancel_project, remove_project, project_status.\n"
         "Extract fields only when present: project_name, idea_text, agent, prompt, "
         "working_dir, provider, model, path.\n"
         "Rules:\n"
         "- If user asks to create/start a new project but gives no name, use create_project with no project_name.\n"
         "- If user asks to start/resume/pause/cancel an existing project, do NOT use create_project.\n"
+        "- Use remove_project only when user explicitly asks to delete/remove/drop a project.\n"
         "- Use recent conversation context for references like 'same project', 'it', 'that'.\n"
         "- If unsure, return {\"intent\":\"none\"}."
     )
@@ -2785,6 +2831,7 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
             "'add idea for API dashboard: support OAuth', "
             "'generate plan for API dashboard', "
             "'status of API dashboard', 'pause API dashboard', "
+            "'remove project API dashboard', "
             "'check coding agents', 'open current project in VS Code', "
             "'use codex to add JWT auth', "
             "'switch cline to gemini model gemini-2.0-flash'."
@@ -2979,6 +3026,15 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
                 )
         except Exception as exc:
             await update.message.reply_text(f"I couldn't generate the plan: {exc}")
+        return True
+
+    if intent == "remove_project":
+        project, error = await _resolve_project(intent_data.get("project_name"))
+        if error:
+            await update.message.reply_text(error)
+            return True
+        _last_project_id = project["id"]
+        await _ask_remove_project_confirmation(update, project)
         return True
 
     if intent in {"approve_and_start", "pause_project", "resume_project", "cancel_project", "project_status"}:
@@ -3270,6 +3326,7 @@ async def request_worker_approval(
 # ------------------------------------------------------------------
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _last_project_id
     query = update.callback_query
     user = update.effective_user
     if not user or user.id != cfg.ALLOWED_USER_ID:
@@ -3338,6 +3395,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("<b>Plan CANCELLED</b>", parse_mode="HTML")
         except Exception as exc:
             await query.edit_message_text(f"Error: {exc}")
+
+    elif data.startswith("confirm_remove_project:"):
+        key = data[len("confirm_remove_project:"):]
+        pending = _pending_project_removals.pop(key, None)
+        if not pending:
+            await query.edit_message_text("Removal request expired or already handled.")
+            return
+
+        project_id = pending.get("project_id", "")
+        display_name = pending.get("display_name", "project")
+        try:
+            removed = await _project_manager.remove_project(project_id)
+            if _last_project_id == project_id:
+                _last_project_id = None
+            local_path = str(removed.get("local_path") or pending.get("local_path") or "").strip()
+            note = (
+                f"\nWorkspace files kept at: <code>{html.escape(local_path)}</code>"
+                if local_path else ""
+            )
+            await query.edit_message_text(
+                f"<b>Removed</b> project <b>{html.escape(display_name)}</b>.{note}",
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            await query.edit_message_text(f"Error removing project: {exc}")
+
+    elif data.startswith("cancel_remove_project:"):
+        key = data[len("cancel_remove_project:"):]
+        pending = _pending_project_removals.pop(key, None)
+        display_name = html.escape(pending.get("display_name", "project")) if pending else "project"
+        await query.edit_message_text(
+            f"Deletion cancelled for <b>{display_name}</b>.",
+            parse_mode="HTML",
+        )
 
 
 # ------------------------------------------------------------------
@@ -3543,6 +3634,21 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Error: {exc}")
 
 
+async def cmd_remove_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorised(update):
+        return
+    project_ref = " ".join(context.args).strip() if context.args else ""
+    project, error = await _resolve_project(project_ref or None)
+    if error:
+        usage = "Usage: /removeproject <project-name>"
+        if not project_ref:
+            await update.message.reply_text(f"{usage}\nOr mention the project in natural language.")
+        else:
+            await update.message.reply_text(error)
+        return
+    await _ask_remove_project_confirmation(update, project)
+
+
 async def cmd_quota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorised(update):
         return
@@ -3719,6 +3825,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /pause &lt;name&gt; - pause project\n"
         "  /resume_project &lt;name&gt; - resume project\n"
         "  /cancel &lt;name&gt; - cancel project\n"
+        "  /removeproject &lt;name&gt; - permanently remove project record (with Yes/No confirmation)\n"
         "  /quota - AI provider status\n\n"
         "<b>Persona Memory:</b>\n"
         "  /profile - show stored profile and preferences\n"
@@ -4183,6 +4290,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume_project", cmd_resume_project))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("removeproject", cmd_remove_project))
     app.add_handler(CommandHandler("quota", cmd_quota))
     app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("forget", cmd_forget))

@@ -71,6 +71,32 @@ async def update_project(
     await db.commit()
 
 
+async def remove_project_cascade(
+    db: aiosqlite.Connection,
+    project_id: str,
+) -> bool:
+    """
+    Permanently remove a project and all project-scoped records.
+
+    Returns True when a project row was deleted.
+    """
+    tables = (
+        "ideas",
+        "tasks",
+        "plans",
+        "agents",
+        "conversations",
+        "project_events",
+        "agent_runs",
+        "task_artifacts",
+    )
+    for table in tables:
+        await db.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
+    cur = await db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    await db.commit()
+    return int(cur.rowcount or 0) > 0
+
+
 async def get_projects_by_status(
     db: aiosqlite.Connection,
     status: str,

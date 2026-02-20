@@ -258,6 +258,21 @@ class ProjectManager:
         await store.update_project(self.db, project_id, status="cancelled")
         await store.add_event(self.db, project_id, "cancelled", "Project cancelled by user")
 
+    async def remove_project(self, project_id: str) -> dict[str, Any]:
+        """
+        Permanently remove a project and all associated DB records.
+
+        Note: Workspace files are not deleted here.
+        """
+        project = await store.get_project(self.db, project_id)
+        if not project:
+            raise ValueError("Project not found.")
+        self.scheduler.cancel(project_id)
+        deleted = await store.remove_project_cascade(self.db, project_id)
+        if not deleted:
+            raise ValueError("Project could not be removed.")
+        return project
+
     async def list_projects(self) -> list[dict[str, Any]]:
         return await store.list_projects(self.db)
 
