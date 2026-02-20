@@ -1,0 +1,23 @@
+project:
+  id: ""
+  name: ""
+  description: ""
+  created_at: ""
+  created_by: ""
+
+execution:
+  scheduler_enabled: true
+  parallel_execution: true
+  control_plane_managed: true
+
+paths:
+  docs_dir: docs/
+  planning_dir: planning/
+  control_dir: control/
+  source_dir: src/
+  tests_dir: tests/
+  infra_dir: infra/
+
+control_plane:
+  task_queue_table: control_tasks
+  file_registry_table: control_task_file_ownership

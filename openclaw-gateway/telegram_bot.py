@@ -18,6 +18,7 @@ import logging
 import html
 import re
 import uuid
+from typing import Any
 
 import aiohttp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -54,6 +55,26 @@ _pending_approvals: dict[str, asyncio.Future] = {}
 _approval_counter: int = 0
 # Stores pending natural-language follow-up for project-name capture by user id.
 _pending_project_name_requests: dict[int, dict[str, str]] = {}
+# Stores pending project documentation intake by user id.
+_pending_project_doc_intake: dict[int, dict[str, Any]] = {}
+
+_PROJECT_DOC_INTAKE_STEPS: list[tuple[str, str]] = [
+    ("problem", "What problem are we solving with this project?"),
+    ("users", "Who are the primary users?"),
+    ("requirements", "List the top requirements or features (comma-separated or bullets)."),
+    ("non_goals", "What is explicitly out of scope?"),
+    ("success_metrics", "How will we measure success?"),
+    ("tech_stack", "Any preferred tech stack or constraints (language/framework/runtime)?"),
+]
+
+_DOC_INTAKE_FIELD_LIMITS: dict[str, int] = {
+    "problem": 1500,
+    "users": 800,
+    "requirements": 2000,
+    "non_goals": 1200,
+    "success_metrics": 1200,
+    "tech_stack": 1200,
+}
 
 # Reference to the Telegram app for sending proactive messages.
 _bot_app: Application | None = None
@@ -943,6 +964,327 @@ def _project_bootstrap_note(project: dict) -> str:
             "Project record was created, but workspace setup did not fully complete."
         )
     return f"Bootstrap: {summary}"
+
+
+def _join_project_path(base: str, leaf: str) -> str:
+    sep = "\\" if ("\\" in base or ":" in base) else "/"
+    return base.rstrip("\\/") + sep + leaf.strip("\\/")
+
+
+def _doc_intake_key(update: Update) -> int | None:
+    user = update.effective_user
+    if user is None:
+        return None
+    return int(user.id)
+
+
+def _sanitize_intake_text(value: str, *, max_chars: int = 1200) -> str:
+    text = (value or "").replace("\r", "\n")
+    # Strip non-printable control chars but preserve newlines/tabs.
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    text = text.strip().strip("`").strip()
+    text = text.replace("```", "''")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    return text
+
+
+def _sanitize_markdown_paragraph(value: str, *, max_chars: int = 1200) -> str:
+    text = _sanitize_intake_text(value, max_chars=max_chars)
+    if not text:
+        return "TBD"
+    # Avoid accidental markdown headings from user input.
+    lines = [re.sub(r"^\s*#+\s*", "", ln).strip() for ln in text.split("\n")]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return "TBD"
+    out = "\n".join(lines)
+    return out if out else "TBD"
+
+
+def _normalize_list_item(value: str) -> str:
+    item = re.sub(r"^\s*[-*•]+\s*", "", value or "").strip()
+    item = re.sub(r"\s+", " ", item).strip(" .;,-")
+    if not item:
+        return ""
+    if len(item) > 220:
+        item = item[:220].rstrip()
+    if item and item[0].isalpha():
+        item = item[0].upper() + item[1:]
+    return item
+
+
+def _parse_natural_list(value: str, *, max_items: int = 12, max_chars: int = 1500) -> list[str]:
+    text = _sanitize_intake_text(value, max_chars=max_chars)
+    if not text:
+        return []
+
+    raw_lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    items: list[str] = []
+    for line in raw_lines:
+        if re.match(r"^\s*[-*•]", line):
+            norm = _normalize_list_item(line)
+            if norm:
+                items.append(norm)
+            continue
+
+        # Natural language often comes as comma/semicolon-separated phrases.
+        parts = [p for p in re.split(r"\s*[;,]\s*", line) if p.strip()]
+        if len(parts) == 1:
+            parts = [line]
+        for p in parts:
+            norm = _normalize_list_item(p)
+            if norm:
+                items.append(norm)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+        if len(deduped) >= max_items:
+            break
+    return deduped
+
+
+def _to_checklist(items: list[str], *, fallback: list[str]) -> list[str]:
+    src = items if items else fallback
+    return [f"- [ ] {i}" for i in src]
+
+
+def _to_bullets(items: list[str], *, fallback: str = "TBD") -> list[str]:
+    if not items:
+        return [f"- {fallback}"]
+    return [f"- {i}" for i in items]
+
+
+def _format_initial_docs_from_answers(project_name: str, answers: dict[str, str]) -> tuple[str, str, str]:
+    problem = _sanitize_markdown_paragraph(
+        str(answers.get("problem", "")),
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["problem"],
+    )
+    users_list = _parse_natural_list(
+        str(answers.get("users", "")),
+        max_items=8,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["users"],
+    )
+    requirements = _parse_natural_list(
+        str(answers.get("requirements", "")),
+        max_items=20,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["requirements"],
+    )
+    non_goals_list = _parse_natural_list(
+        str(answers.get("non_goals", "")),
+        max_items=12,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["non_goals"],
+    )
+    metrics_list = _parse_natural_list(
+        str(answers.get("success_metrics", "")),
+        max_items=12,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["success_metrics"],
+    )
+    tech_list = _parse_natural_list(
+        str(answers.get("tech_stack", "")),
+        max_items=12,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["tech_stack"],
+    )
+
+    req_lines = _to_checklist(
+        requirements,
+        fallback=["Define core user flow", "Define MVP scope"],
+    )
+    users_lines = _to_bullets(users_list)
+    non_goal_lines = _to_bullets(non_goals_list)
+    metric_lines = _to_bullets(metrics_list)
+    tech_lines = _to_bullets(tech_list)
+
+    prd = (
+        "# Product Requirements Document (PRD)\n\n"
+        f"## Problem\n{problem}\n\n"
+        f"## Users\n{chr(10).join(users_lines)}\n\n"
+        f"## Requirements\n{chr(10).join(req_lines)}\n\n"
+        f"## Non-Goals\n{chr(10).join(non_goal_lines)}\n\n"
+        f"## Success Metrics\n{chr(10).join(metric_lines)}\n\n"
+        f"## Technical Constraints\n{chr(10).join(tech_lines)}\n"
+    )
+
+    overview = (
+        "# Product Overview\n\n"
+        f"{project_name} aims to solve:\n\n"
+        f"- {problem}\n\n"
+        "Primary users:\n\n"
+        + "\n".join(users_lines)
+        + "\n"
+    )
+
+    features = "# Features\n\n" + "\n".join(req_lines) + "\n"
+    return prd, overview, features
+
+
+def _intake_answers_to_idea_text(project_name: str, answers: dict[str, str]) -> str:
+    lines = [f"Initial documentation intake for {project_name}:"]
+    for key, _question in _PROJECT_DOC_INTAKE_STEPS:
+        val = _sanitize_intake_text(
+            str(answers.get(key, "")),
+            max_chars=_DOC_INTAKE_FIELD_LIMITS.get(key, 1200),
+        )
+        if val:
+            lines.append(f"- {key}: {val}")
+    return "\n".join(lines)
+
+
+def _action_result_ok(result: dict[str, Any]) -> tuple[bool, str]:
+    if result.get("status") == "error" or result.get("error"):
+        return False, str(result.get("error", "Unknown action error"))
+    inner = result.get("result", {}) if isinstance(result.get("result", {}), dict) else {}
+    rc = inner.get("returncode", 0)
+    try:
+        rc_int = int(rc)
+    except Exception:
+        rc_int = 0
+    if rc_int != 0:
+        stderr = str(inner.get("stderr", "")).strip()
+        stdout = str(inner.get("stdout", "")).strip()
+        return False, stderr or stdout or f"exit code {rc_int}"
+    return True, ""
+
+
+async def _write_initial_project_docs(project: dict, answers: dict[str, str]) -> tuple[bool, str]:
+    path = str(project.get("local_path") or "").strip()
+    if not path:
+        return False, "project local_path is empty"
+
+    prd, overview, features = _format_initial_docs_from_answers(
+        _project_display(project),
+        answers,
+    )
+    docs_dir = _join_project_path(path, "docs")
+    product_dir = _join_project_path(docs_dir, "product")
+
+    ops = [
+        ("create_directory", {"directory": docs_dir}),
+        ("create_directory", {"directory": product_dir}),
+        ("file_write", {"file": _join_project_path(product_dir, "PRD.md"), "content": prd}),
+        ("file_write", {"file": _join_project_path(product_dir, "overview.md"), "content": overview}),
+        ("file_write", {"file": _join_project_path(product_dir, "features.md"), "content": features}),
+    ]
+    for action, params in ops:
+        result = await _send_action(action, params, confirmed=True)
+        ok, err = _action_result_ok(result)
+        if not ok:
+            return False, f"{action} failed: {err}"
+    return True, ""
+
+
+async def _finalize_project_doc_intake(update: Update, state: dict[str, Any]) -> None:
+    if _project_manager is None:
+        return
+    try:
+        from db import store
+
+        project = await store.get_project(_project_manager.db, state["project_id"])
+    except Exception:
+        logger.exception("Failed loading project for doc intake finalization.")
+        project = None
+
+    if not project:
+        await update.message.reply_text("I could not load the project to finalize documentation intake.")
+        return
+
+    answers = dict(state.get("answers") or {})
+    idea_text = _intake_answers_to_idea_text(_project_display(project), answers)
+    idea_count = None
+    try:
+        idea_count = await _project_manager.add_idea(project["id"], idea_text)
+    except Exception:
+        logger.exception("Failed adding documentation intake as idea.")
+
+    wrote_docs, err = await _write_initial_project_docs(project, answers)
+    if wrote_docs:
+        await update.message.reply_text(
+            (
+                f"Initial documentation created for '{_project_display(project)}' "
+                f"at {_join_project_path(project.get('local_path', ''), 'docs/product')}."
+                + (f"\nCaptured as idea #{idea_count}." if idea_count else "")
+            )
+        )
+    else:
+        await update.message.reply_text(
+            (
+                f"I captured the documentation intake for '{_project_display(project)}'"
+                + (f" as idea #{idea_count}" if idea_count else "")
+                + f", but could not write docs files yet: {err}"
+            )
+        )
+
+
+async def _start_project_documentation_intake(update: Update, project: dict) -> None:
+    key = _doc_intake_key(update)
+    if key is None:
+        return
+    _pending_project_doc_intake[key] = {
+        "project_id": project["id"],
+        "step_index": 0,
+        "answers": {},
+    }
+    first_q = _PROJECT_DOC_INTAKE_STEPS[0][1]
+    await update.message.reply_text(
+        (
+            f"Starting skynet-project-documentation intake for '{_project_display(project)}'.\n"
+            "Reply naturally; I will turn this into initial docs. "
+            "Say 'skip docs' any time to stop.\n\n"
+            f"Q1/{len(_PROJECT_DOC_INTAKE_STEPS)}: {first_q}"
+        )
+    )
+
+
+async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
+    key = _doc_intake_key(update)
+    if key is None:
+        return False
+    state = _pending_project_doc_intake.get(key)
+    if not state:
+        return False
+    if (text or "").strip().startswith("/"):
+        return False
+
+    lowered = (text or "").strip().lower()
+    if lowered in {"skip", "skip docs", "cancel docs", "stop docs", "later"}:
+        _pending_project_doc_intake.pop(key, None)
+        await update.message.reply_text("Skipped documentation intake. Say 'resume docs intake' to continue later.")
+        return True
+
+    idx = int(state.get("step_index", 0))
+    if idx < 0 or idx >= len(_PROJECT_DOC_INTAKE_STEPS):
+        _pending_project_doc_intake.pop(key, None)
+        return False
+
+    field, _question = _PROJECT_DOC_INTAKE_STEPS[idx]
+    answers = dict(state.get("answers") or {})
+    answers[field] = _sanitize_intake_text(
+        (text or ""),
+        max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200),
+    )
+    idx += 1
+    state["step_index"] = idx
+    state["answers"] = answers
+    _pending_project_doc_intake[key] = state
+
+    if idx < len(_PROJECT_DOC_INTAKE_STEPS):
+        next_q = _PROJECT_DOC_INTAKE_STEPS[idx][1]
+        await update.message.reply_text(f"Q{idx + 1}/{len(_PROJECT_DOC_INTAKE_STEPS)}: {next_q}")
+        return True
+
+    _pending_project_doc_intake.pop(key, None)
+    await update.message.reply_text("Great. Finalizing initial documentation now...")
+    await _finalize_project_doc_intake(update, state)
+    return True
 
 
 def _is_plausible_project_name(name: str) -> bool:
@@ -1944,6 +2286,7 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
                 "Share details naturally. Once details are enough, I can auto-plan and execute."
             )
         )
+        await _start_project_documentation_intake(update, project)
         return True
     except Exception as exc:
         await update.message.reply_text(f"I couldn't create that project: {exc}")
@@ -2212,28 +2555,7 @@ async def cmd_newproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Usage: /newproject <name>\nExample: /newproject habit-tracker")
         return
     name = " ".join(context.args)
-    try:
-        project = await _project_manager.create_project(name)
-        repo_line = (
-            f"\n<b>GitHub:</b> {html.escape(project.get('github_repo', ''))}"
-            if project.get("github_repo") else ""
-        )
-        bootstrap_note_raw = _project_bootstrap_note(project)
-        bootstrap_line = (
-            f"\n\n<b>Bootstrap:</b>\n{html.escape(bootstrap_note_raw)}"
-            if bootstrap_note_raw else ""
-        )
-        await update.message.reply_text(
-            f"<b>Project created:</b> {html.escape(project['display_name'])}\n\n"
-            f"<b>Path:</b> <code>{html.escape(project.get('local_path', ''))}</code>"
-            f"{repo_line}{bootstrap_line}\n\n"
-            f"Send ideas as text messages.\n"
-            f"I can auto-plan/start once enough details are captured "
-            f"(threshold: {cfg.AUTO_PLAN_MIN_IDEAS} ideas).",
-            parse_mode="HTML",
-        )
-    except Exception as exc:
-        await update.message.reply_text(f"Error: {exc}")
+    await _create_project_from_name(update, name)
 
 
 async def cmd_idea(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3000,6 +3322,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _capture_profile_memory(update, text, skip_store=skip_store)
 
     if await _maybe_handle_pending_project_name(update, text):
+        return
+
+    if await _maybe_handle_project_doc_intake(update, text):
         return
 
     # Optional explicit idea prefix while in chat mode.

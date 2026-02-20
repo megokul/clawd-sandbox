@@ -1,0 +1,13 @@
+change_control:
+  require_approval_for:
+    - policy_changes
+    - architecture_changes
+    - infra_changes
+    - dependency_changes
+
+approval:
+  required_approvers:
+    - project_owner
+  approval_method:
+    - telegram_confirmation
+    - control_plane_api

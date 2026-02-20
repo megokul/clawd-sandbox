@@ -1,0 +1,17 @@
+project:
+  id: ""
+
+execution:
+  phase: planning
+  progress_percentage: 0
+  last_updated: ""
+
+summary:
+  total_tasks: 0
+  completed_tasks: 0
+  active_tasks: 0
+  pending_tasks: 0
+
+tasks: {}
+blockers: []
+next_eligible_tasks: []

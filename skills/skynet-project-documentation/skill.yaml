@@ -1,0 +1,69 @@
+---
+name: skynet-project-documentation
+model: standard
+description: |
+  SKYNET-native project documentation plus governance and progress tracking.
+  Creates a deterministic project template (human and agent readable), enforces policy gates,
+  generates and locks plans (PlanSuite), and integrates with SKYNET control-plane task queue
+  (enqueue/claim/complete/release) including dependency graph and file ownership safety.
+
+  Use when: starting a project from Telegram, bootstrapping docs, generating plans, finalizing plans,
+  syncing progress for multiple agents or people, enforcing policies.
+
+triggers:
+  - start project
+  - create project template
+  - project documentation
+  - PRD
+  - ADR
+  - plan
+  - finalize plan
+  - progress
+  - resume work
+  - policy
+
+actions:
+  - name: create_project
+    description: Create a new project from the SKYNET template and register it (optional) with control plane.
+    inputs:
+      project_name: { type: string, required: true }
+      project_id: { type: string, required: false }
+      root_dir: { type: string, required: false }
+      description: { type: string, required: false }
+
+  - name: generate_plan
+    description: Generate or refresh task_plan.md skeleton from PRD plus docs and build TASK_GRAPH.yaml (DRAFT only).
+    inputs:
+      project_dir: { type: string, required: true }
+
+  - name: finalize_plan_and_enqueue
+    description: Freeze plan (STATUS FINALIZED) then enqueue tasks into SKYNET control plane with dependencies and outputs.
+    inputs:
+      project_dir: { type: string, required: true }
+      gateway_hint: { type: string, required: false }
+
+  - name: sync_progress
+    description: Sync human-readable progress plus execution ledger from control-plane DB and write next actions for resume.
+    inputs:
+      project_dir: { type: string, required: true }
+
+  - name: create_adr
+    description: Create a new ADR file plus record in memory/decisions.yaml.
+    inputs:
+      project_dir: { type: string, required: true }
+      title: { type: string, required: true }
+      decision: { type: string, required: true }
+      context: { type: string, required: true }
+      consequences: { type: string, required: true }
+      alternatives: { type: string, required: false }
+
+  - name: check_policy_gate
+    description: Validate project policy gates (plan finalized, required docs exist) and optionally write audit logs.
+    inputs:
+      project_dir: { type: string, required: true }
+      gate: { type: string, required: false }
+
+runtime:
+  entrypoint: handler.py
+  language: python
+---

@@ -1,0 +1,8 @@
+state:
+  phase: planning
+  total_tasks: 0
+  completed_tasks: 0
+  active_tasks: 0
+  failed_tasks: 0
+  progress_percentage: 0
+  last_updated: ""

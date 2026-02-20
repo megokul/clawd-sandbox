@@ -1,0 +1,12 @@
+constraints:
+  forbid_execution_if:
+    - plan_not_finalized
+    - dependencies_incomplete
+    - task_not_claimed
+
+  forbid_file_modification_if:
+    - ownership_not_registered
+
+  require:
+    - execution_logging
+    - ledger_update

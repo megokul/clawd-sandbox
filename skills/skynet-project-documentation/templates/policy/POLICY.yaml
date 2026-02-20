@@ -1,0 +1,37 @@
+policy:
+  version: 1.0
+  enforcement_mode: strict
+
+execution:
+  allow_parallel_execution: true
+  require_task_claim: true
+  require_file_ownership: true
+  forbid_unclaimed_file_modification: true
+  forbid_execution_without_dependency_completion: true
+
+documentation:
+  require_prd: true
+  require_task_plan: true
+  require_finalized_plan: true
+  forbid_execution_without_plan_finalized: true
+
+change_control:
+  require_approval_for:
+    - architecture_changes
+    - dependency_changes
+    - infra_changes
+    - policy_changes
+
+agent_behavior:
+  forbid_agents_from:
+    - modifying_files_without_ownership
+    - executing_unassigned_tasks
+    - modifying_policy_files
+  require_agents_to:
+    - update_execution_ledger
+    - log_findings
+    - update_progress
+
+recovery:
+  allow_task_reassignment_on_timeout: true
+  task_timeout_minutes: 60
