@@ -1,0 +1,23 @@
+access:
+  agents:
+    general_agent:
+      allowed_actions:
+        - claim_task
+        - execute_task
+        - update_progress
+      forbidden_actions:
+        - modify_policy
+        - override_locks
+
+  humans:
+    admin:
+      allowed_actions:
+        - modify_policy
+        - override_tasks
+        - reassign_tasks
+    developer:
+      allowed_actions:
+        - execute_tasks
+        - update_docs
+      forbidden_actions:
+        - modify_policy

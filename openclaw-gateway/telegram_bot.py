@@ -18,6 +18,7 @@ import logging
 import html
 import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -75,6 +76,30 @@ _DOC_INTAKE_FIELD_LIMITS: dict[str, int] = {
     "success_metrics": 1200,
     "tech_stack": 1200,
 }
+
+_DOC_LLM_TARGET_PATHS: tuple[str, ...] = (
+    "docs/product/PRD.md",
+    "docs/product/overview.md",
+    "docs/product/features.md",
+    "docs/architecture/overview.md",
+    "docs/architecture/system-design.md",
+    "docs/architecture/data-flow.md",
+    "docs/runbooks/local-dev.md",
+    "docs/runbooks/deploy.md",
+    "docs/runbooks/recovery.md",
+    "docs/guides/getting-started.md",
+    "docs/guides/configuration.md",
+    "planning/task_plan.md",
+    "planning/progress.md",
+    "planning/findings.md",
+)
+
+_FINALIZED_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent
+    / "templates"
+    / "skynet-project-documentation"
+    / "templates"
+)
 
 # Reference to the Telegram app for sending proactive messages.
 _bot_app: Application | None = None
@@ -1212,30 +1237,363 @@ def _action_result_ok(result: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def _sanitize_markdown_document(value: str, *, max_chars: int = 50000) -> str:
+    text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    if not text:
+        return ""
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def _normalize_doc_relpath(path: str) -> str:
+    return re.sub(r"/{2,}", "/", (path or "").strip().replace("\\", "/")).strip("/")
+
+
+def _load_finalized_template_files() -> dict[str, str]:
+    root = _FINALIZED_TEMPLATE_PATH
+    if not root.exists() or not root.is_dir():
+        return {}
+
+    out: dict[str, str] = {}
+    for item in root.rglob("*"):
+        if not item.is_file():
+            continue
+        rel = _normalize_doc_relpath(str(item.relative_to(root)))
+        if not rel:
+            continue
+        try:
+            out[rel] = item.read_text(encoding="utf-8")
+        except Exception:
+            logger.exception("Failed loading template file: %s", item)
+    return out
+
+
+def _render_project_yaml(project: dict) -> str:
+    def _yaml_quote(value: str) -> str:
+        return (value or "").replace("\\", "\\\\").replace("\"", "\\\"")
+
+    project_id = str(project.get("id", "")).strip()
+    project_name = _project_display(project)
+    description = _sanitize_markdown_paragraph(str(project.get("description", "")), max_chars=1500)
+    created_at = str(project.get("created_at", "")).strip()
+    return (
+        "project:\n"
+        f"  id: \"{_yaml_quote(project_id)}\"\n"
+        f"  name: \"{_yaml_quote(project_name)}\"\n"
+        f"  description: \"{_yaml_quote(description)}\"\n"
+        f"  created_at: \"{_yaml_quote(created_at)}\"\n"
+        "  created_by: \"skynet\"\n"
+        "\n"
+        "execution:\n"
+        "  scheduler_enabled: true\n"
+        "  parallel_execution: true\n"
+        "  control_plane_managed: true\n"
+        "\n"
+        "paths:\n"
+        "  docs_dir: docs/\n"
+        "  planning_dir: planning/\n"
+        "  control_dir: control/\n"
+        "  source_dir: src/\n"
+        "  tests_dir: tests/\n"
+        "  infra_dir: infra/\n"
+        "\n"
+        "control_plane:\n"
+        "  task_queue_table: control_tasks\n"
+        "  file_registry_table: control_task_file_ownership\n"
+    )
+
+
+def _render_project_state_yaml() -> str:
+    return (
+        "state:\n"
+        "  phase: planning\n"
+        "  total_tasks: 0\n"
+        "  completed_tasks: 0\n"
+        "  active_tasks: 0\n"
+        "  failed_tasks: 0\n"
+        "  progress_percentage: 0\n"
+        "  last_updated: \"\"\n"
+    )
+
+
+def _build_baseline_doc_pack(project_name: str, answers: dict[str, str]) -> dict[str, str]:
+    prd, overview, features = _format_initial_docs_from_answers(project_name, answers)
+    problem = _sanitize_markdown_paragraph(
+        str(answers.get("problem", "")),
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["problem"],
+    )
+    if not problem or problem == "TBD":
+        problem = f"{project_name} should solve a clear user-facing problem with a small MVP."
+    users = _parse_natural_list(
+        str(answers.get("users", "")),
+        max_items=8,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["users"],
+    )
+    requirements = _parse_natural_list(
+        str(answers.get("requirements", "")),
+        max_items=20,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["requirements"],
+    )
+    tech = _parse_natural_list(
+        str(answers.get("tech_stack", "")),
+        max_items=12,
+        max_chars=_DOC_INTAKE_FIELD_LIMITS["tech_stack"],
+    )
+    user_lines = _to_bullets(users, fallback="General end users")
+    req_lines = _to_checklist(requirements, fallback=["Deliver MVP workflow", "Include basic validation and error handling"])
+    tech_lines = _to_bullets(tech, fallback="To be finalized after implementation spike")
+    tech_text = ", ".join(tech) if tech else "TBD"
+
+    docs: dict[str, str] = {
+        "docs/product/PRD.md": prd,
+        "docs/product/overview.md": overview,
+        "docs/product/features.md": features,
+        "docs/architecture/overview.md": (
+            "# Architecture Overview (Current State)\n\n"
+            f"## Project\n{project_name}\n\n"
+            "## Objective\n"
+            f"- {problem}\n\n"
+            "## Core Components\n"
+            "- Telegram interaction layer\n"
+            "- Control plane task lifecycle\n"
+            "- OpenClaw gateway and worker execution\n"
+            "- Project documentation and memory persistence\n"
+        ),
+        "docs/architecture/system-design.md": (
+            "# System Design (Current State)\n\n"
+            "## Components\n"
+            "- Main Persona Agent\n"
+            "- Planner/Manager/Worker orchestration\n"
+            "- Control plane queue and state machine\n"
+            "- OpenClaw execution gateway\n\n"
+            f"## Initial Technical Direction\n- Preferred stack: {tech_text}\n"
+        ),
+        "docs/architecture/data-flow.md": (
+            "# Data Flow (Current State)\n\n"
+            "1. User sends natural-language request in Telegram.\n"
+            "2. Gateway classifies intent and resolves project context.\n"
+            "3. For project work, tasks/events are stored in control-plane data.\n"
+            "4. Worker execution outputs artifacts and updates status.\n"
+            "5. Documentation files are updated in project workspace.\n"
+        ),
+        "docs/runbooks/local-dev.md": (
+            "# Runbook: Local Development\n\n"
+            "## Prerequisites\n- Python\n- Git\n- Docker (recommended)\n\n"
+            "## Setup\n1. Clone repository\n2. Configure environment variables\n3. Start services\n\n"
+            "## Verify\n- Health checks pass\n- Project docs are present\n"
+        ),
+        "docs/runbooks/deploy.md": (
+            "# Runbook: Deploy\n\n"
+            "## Deployment Steps\n1. Push changes to main\n2. Trigger CI/CD workflow\n3. Verify container health and logs\n\n"
+            "## Post-Deploy Checks\n- API health endpoint\n- Gateway startup provider logs\n- Project path and SSH fallback readiness\n"
+        ),
+        "docs/runbooks/recovery.md": (
+            "# Runbook: Recovery\n\n"
+            "## Common Failure Modes\n- SSH tunnel unavailable\n- provider quota exhaustion\n- stale task locks\n\n"
+            "## Recovery\n1. Validate worker connectivity\n2. Reap stale locks\n3. Resume failed tasks with revised plan\n"
+        ),
+        "docs/guides/getting-started.md": (
+            "# Getting Started\n\n"
+            f"## Project\n{project_name}\n\n"
+            "## What this solves\n"
+            f"- {problem}\n\n"
+            "## Primary users\n"
+            + "\n".join(user_lines)
+            + "\n\n## First Deliverables\n"
+            + "\n".join(req_lines[:5])
+            + "\n"
+        ),
+        "docs/guides/configuration.md": (
+            "# Configuration\n\n"
+            "## Core Environment Variables\n"
+            "- SKYNET_PROJECT_BASE_DIR\n"
+            "- OPENCLAW_PROJECT_BASE_DIR\n"
+            "- SKYNET_DEFAULT_WORKING_DIR\n"
+            "- OPENCLAW_DEFAULT_WORKING_DIR\n"
+            "- OPENCLAW_SSH_ALLOWED_ROOTS\n\n"
+            "## Project Tech Preferences\n"
+            + "\n".join(tech_lines)
+            + "\n"
+        ),
+        "planning/task_plan.md": (
+            "STATUS: DRAFT\n\n"
+            "# Project Plan\n\n"
+            "## Goal\n"
+            f"{problem}\n\n"
+            "## Milestones (Initial)\n\n"
+            "### TASK-001: Finalize requirements and acceptance criteria\n"
+            "Dependencies:\n"
+            "Outputs:\n"
+            "  - docs/product/PRD.md\n\n"
+            "### TASK-002: Implement MVP skeleton\n"
+            "Dependencies: TASK-001\n"
+            "Outputs:\n"
+            "  - src/\n"
+            "  - tests/\n\n"
+            "### TASK-003: Validate and document\n"
+            "Dependencies: TASK-002\n"
+            "Outputs:\n"
+            "  - docs/runbooks/local-dev.md\n"
+            "  - planning/progress.md\n"
+        ),
+        "planning/progress.md": (
+            "Project Progress: 0%\n\n"
+            "Completed:\n\n"
+            "In Progress:\n\n"
+            "Pending:\n"
+            "- TASK-001: Finalize requirements and acceptance criteria\n"
+            "- TASK-002: Implement MVP skeleton\n"
+            "- TASK-003: Validate and document\n\n"
+            "Next Actions:\n"
+            "- Confirm scope and lock MVP requirements\n"
+        ),
+        "planning/findings.md": (
+            "# Findings\n\n"
+            "Record:\n"
+            "- key decisions\n"
+            "- pitfalls and mitigations\n"
+            "- validation commands\n"
+            "- rollback steps\n"
+        ),
+    }
+    return {k: _sanitize_markdown_document(v) for k, v in docs.items()}
+
+
+def _sanitize_generated_doc_pack(payload: dict) -> dict[str, str]:
+    docs = payload.get("documents") if isinstance(payload.get("documents"), dict) else payload
+    if not isinstance(docs, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw_path, raw_body in docs.items():
+        if not isinstance(raw_path, str) or not isinstance(raw_body, str):
+            continue
+        rel = _normalize_doc_relpath(raw_path)
+        if rel not in _DOC_LLM_TARGET_PATHS:
+            continue
+        body = _sanitize_markdown_document(raw_body)
+        if len(body) < 80:
+            continue
+        out[rel] = body
+    return out
+
+
+async def _generate_detailed_doc_pack_with_llm(
+    project: dict,
+    answers: dict[str, str],
+    baseline_docs: dict[str, str],
+) -> tuple[dict[str, str], str]:
+    if _provider_router is None:
+        return {}, "provider router unavailable"
+
+    intake = {
+        field: _sanitize_intake_text(
+            str(answers.get(field, "")),
+            max_chars=_DOC_INTAKE_FIELD_LIMITS.get(field, 1200),
+        )
+        for field, _ in _PROJECT_DOC_INTAKE_STEPS
+    }
+    baseline_excerpt = {
+        k: v[:2000]
+        for k, v in baseline_docs.items()
+    }
+
+    system = (
+        "You are a principal software architect and technical writer. "
+        "Generate comprehensive, production-grade project documentation from partial user input. "
+        "Use reasonable explicit assumptions where details are missing. "
+        "Return ONLY valid JSON with shape: "
+        "{\"documents\": {\"<relative/path>.md\": \"<markdown>\"}}. "
+        "Do not include any keys outside the required document paths."
+    )
+    user_payload = {
+        "project_name": _project_display(project),
+        "project_id": str(project.get("id", "")),
+        "project_path": str(project.get("local_path", "")),
+        "required_document_paths": list(_DOC_LLM_TARGET_PATHS),
+        "user_intake": intake,
+        "baseline_documents_excerpt": baseline_excerpt,
+        "quality_bar": [
+            "Detailed sections with assumptions, constraints, risks, and acceptance criteria",
+            "Concrete, technically consistent architecture and data flow descriptions",
+            "Actionable runbooks and configuration guidance",
+            "Do not just restate user text; synthesize missing details responsibly",
+        ],
+    }
+    try:
+        response = await _provider_router.chat(
+            [{"role": "user", "content": json.dumps(user_payload)}],
+            system=system,
+            max_tokens=7000,
+            task_type="planning",
+            preferred_provider="gemini",
+            allowed_providers=_CHAT_PROVIDER_ALLOWLIST,
+        )
+    except Exception as exc:
+        return {}, str(exc)
+
+    payload = _extract_json_object(response.text or "")
+    if not payload:
+        return {}, "model did not return JSON"
+    docs = _sanitize_generated_doc_pack(payload)
+    if not docs:
+        return {}, "model returned no valid document content"
+    return docs, ""
+
+
 async def _write_initial_project_docs(project: dict, answers: dict[str, str]) -> tuple[bool, str]:
     path = str(project.get("local_path") or "").strip()
     if not path:
         return False, "project local_path is empty"
 
-    prd, overview, features = _format_initial_docs_from_answers(
-        _project_display(project),
-        answers,
-    )
-    docs_dir = _join_project_path(path, "docs")
-    product_dir = _join_project_path(docs_dir, "product")
+    template_files = _load_finalized_template_files()
+    if not template_files:
+        return False, f"finalized template not found at {_FINALIZED_TEMPLATE_PATH}"
 
-    ops = [
-        ("create_directory", {"directory": docs_dir}),
-        ("create_directory", {"directory": product_dir}),
-        ("file_write", {"file": _join_project_path(product_dir, "PRD.md"), "content": prd}),
-        ("file_write", {"file": _join_project_path(product_dir, "overview.md"), "content": overview}),
-        ("file_write", {"file": _join_project_path(product_dir, "features.md"), "content": features}),
-    ]
+    template_files["PROJECT.yaml"] = _render_project_yaml(project)
+    template_files["PROJECT_STATE.yaml"] = _render_project_state_yaml()
+
+    baseline_docs = _build_baseline_doc_pack(_project_display(project), answers)
+    llm_docs, llm_warning = await _generate_detailed_doc_pack_with_llm(project, answers, baseline_docs)
+
+    final_docs = dict(baseline_docs)
+    final_docs.update(llm_docs)
+    for rel, content in final_docs.items():
+        template_files[rel] = content
+
+    directories: set[str] = set()
+    for rel in template_files.keys():
+        rel_norm = _normalize_doc_relpath(rel)
+        if "/" in rel_norm:
+            directories.add(rel_norm.rsplit("/", 1)[0])
+
+    ops: list[tuple[str, dict[str, str]]] = []
+    for rel_dir in sorted(directories):
+        ops.append(("create_directory", {"directory": _join_project_path(path, rel_dir)}))
+    for rel, content in sorted(template_files.items(), key=lambda item: item[0]):
+        ops.append(
+            (
+                "file_write",
+                {
+                    "file": _join_project_path(path, _normalize_doc_relpath(rel)),
+                    "content": str(content),
+                },
+            )
+        )
+
     for action, params in ops:
         result = await _send_action(action, params, confirmed=True)
         ok, err = _action_result_ok(result)
         if not ok:
             return False, f"{action} failed: {err}"
+    if llm_warning and not llm_docs:
+        return True, f"LLM enrichment unavailable ({llm_warning}); finalized template baseline was written."
+    if llm_warning:
+        return True, f"LLM enrichment note: {llm_warning}"
     return True, ""
 
 
@@ -1264,11 +1622,13 @@ async def _finalize_project_doc_intake(update: Update, state: dict[str, Any]) ->
 
     wrote_docs, err = await _write_initial_project_docs(project, answers)
     if wrote_docs:
+        note_line = f"\nNote: {err}" if err else ""
         await update.message.reply_text(
             (
                 f"Initial documentation created for '{_project_display(project)}' "
-                f"at {_join_project_path(project.get('local_path', ''), 'docs/product')}."
+                f"using the finalized template at {_join_project_path(project.get('local_path', ''), 'docs')}."
                 + (f"\nCaptured as idea #{idea_count}." if idea_count else "")
+                + note_line
             )
         )
     else:
@@ -2350,11 +2710,13 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
         bootstrap_note = _project_bootstrap_note(project)
         if bootstrap_note:
             bootstrap_note = "\n" + bootstrap_note
-        docs_note = (
-            "\nDocumentation: initialized docs/product/PRD.md, overview.md, and features.md."
-            if docs_ok else
-            f"\nDocumentation warning: baseline docs initialization failed ({docs_err})."
-        )
+        if docs_ok:
+            docs_note = (
+                "\nDocumentation: finalized template initialized with comprehensive LLM-generated content."
+                + (f"\nNote: {docs_err}" if docs_err else "")
+            )
+        else:
+            docs_note = f"\nDocumentation warning: initialization failed ({docs_err})."
         await update.message.reply_text(
             (
                 f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}\n"

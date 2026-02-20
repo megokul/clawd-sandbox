@@ -1,0 +1,16 @@
+enforcement:
+  control_plane:
+    enforce_task_claim: true
+    enforce_dependencies: true
+    enforce_file_ownership: true
+
+  gateway:
+    verify_policy_before_execution: true
+
+  worker:
+    must_validate_claim_token: true
+
+violation_response:
+  log_violation: true
+  notify_control_plane: true
+  optionally_block_execution: true
