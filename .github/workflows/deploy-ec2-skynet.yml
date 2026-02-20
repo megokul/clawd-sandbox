@@ -208,13 +208,15 @@ jobs:
           } > .env.ci
           chmod 600 .env.ci
 
-      - name: Remove stale OpenClaw gateway container if present
+      - name: Remove stale fixed-name containers if present
         shell: bash
         run: |
-          if docker ps -a --format '{{.Names}}' | grep -qx 'openclaw-gateway'; then
-            echo "Removing existing openclaw-gateway container to avoid name conflict"
-            docker rm -f openclaw-gateway
-          fi
+          for cname in skynet-api openclaw-gateway; do
+            if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+              echo "Removing existing $cname container to avoid name conflict"
+              docker rm -f "$cname"
+            fi
+          done
 
       - name: Deploy full stack
         shell: bash
