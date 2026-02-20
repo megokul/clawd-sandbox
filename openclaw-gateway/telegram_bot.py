@@ -554,6 +554,73 @@ def _store_pending_project_removal(project: dict[str, Any]) -> str:
     return key
 
 
+def _truncate_for_notice(value: str, *, max_chars: int = 700) -> str:
+    text = (value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + " ..."
+
+
+def _format_notification(level: str, title: str, body: str, *, project: str = "") -> str:
+    label_map = {
+        "info": "INFO",
+        "progress": "IN_PROGRESS",
+        "success": "SUCCESS",
+        "warning": "WARNING",
+        "error": "ERROR",
+    }
+    label = label_map.get(level, "INFO")
+    ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    lines = [
+        f"<b>[NOTIFICATION | {html.escape(label)}]</b>",
+        f"<b>{html.escape(title)}</b>",
+        f"<code>time={html.escape(ts)}</code>",
+    ]
+    if project:
+        lines.append(f"<code>project={html.escape(project)}</code>")
+    lines.append("")
+    lines.append(html.escape(_truncate_for_notice(body, max_chars=1800)))
+    return "\n".join(lines)
+
+
+async def _notify_styled(level: str, title: str, body: str, *, project: str = "") -> None:
+    await _send_to_user(_format_notification(level, title, body, project=project), parse_mode="HTML")
+
+
+async def _run_gateway_action_in_background(
+    *,
+    action: str,
+    params: dict[str, str],
+    title: str,
+    project: str = "",
+) -> None:
+    await _notify_styled(
+        "progress",
+        title,
+        f"Started background execution for action '{action}'.",
+        project=project,
+    )
+    try:
+        result = await _send_action(action, params, confirmed=True)
+        if str(result.get("status", "")).lower() == "error":
+            err = str(result.get("error") or "Unknown gateway error")
+            await _notify_styled("error", title, f"Action '{action}' failed: {err}", project=project)
+            return
+
+        inner = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+        rc = inner.get("returncode", "?")
+        stdout = _truncate_for_notice(str(inner.get("stdout", "")).strip(), max_chars=650)
+        stderr = _truncate_for_notice(str(inner.get("stderr", "")).strip(), max_chars=500)
+        summary_lines = [f"Action: {action}", f"Exit code: {rc}"]
+        if stdout:
+            summary_lines.append(f"stdout: {stdout}")
+        if stderr:
+            summary_lines.append(f"stderr: {stderr}")
+        await _notify_styled("success", title, "\n".join(summary_lines), project=project)
+    except Exception as exc:
+        await _notify_styled("error", title, f"Action '{action}' raised: {exc}", project=project)
+
+
 async def _ask_remove_project_confirmation(update: Update, project: dict[str, Any]) -> None:
     key = _store_pending_project_removal(project)
     display = html.escape(_project_display(project))
@@ -602,6 +669,15 @@ def _spawn_background_task(coro, *, tag: str) -> None:
             t.result()
         except Exception:
             logger.exception("Background task failed: %s", tag)
+            if not tag.endswith("-notify-failure"):
+                _spawn_background_task(
+                    _notify_styled(
+                        "error",
+                        "Background Task Failure",
+                        f"Task '{tag}' failed. Check gateway logs for details.",
+                    ),
+                    tag=f"{tag}-notify-failure",
+                )
 
     task.add_done_callback(_done)
 
@@ -1929,6 +2005,14 @@ async def _run_project_docs_generation_async(
     reason: str,
     notify_user: bool = True,
 ) -> None:
+    name = _project_display(project)
+    if notify_user:
+        await _notify_styled(
+            "progress",
+            "Documentation Update",
+            f"Started documentation processing ({reason}). I will send a completion update.",
+            project=name,
+        )
     start = time.monotonic()
     ok, note = await _write_initial_project_docs(
         project,
@@ -1936,21 +2020,20 @@ async def _run_project_docs_generation_async(
         scaffold_only=(reason == "project_create"),
     )
     elapsed = round(time.monotonic() - start, 1)
-    name = _project_display(project)
     if ok:
         msg = (
-            f"Documentation update complete for '{name}' ({reason}) in {elapsed}s.\n"
+            f"Documentation update complete ({reason}) in {elapsed}s.\n"
             f"Template root: {_join_project_path(project.get('local_path', ''), 'docs')}"
         )
         if note:
             msg += f"\nNote: {note}"
     else:
         msg = (
-            f"Documentation update failed for '{name}' ({reason}) after {elapsed}s.\n"
+            f"Documentation update failed ({reason}) after {elapsed}s.\n"
             f"Error: {note}"
         )
     if notify_user:
-        await _send_to_user(msg)
+        await _notify_styled("success" if ok else "error", "Documentation Update", msg, project=name)
 
 
 async def _finalize_project_doc_intake(update: Update | None, state: dict[str, Any]) -> None:
@@ -2880,14 +2963,20 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
 
         try:
             await update.message.reply_text(
-                f"Running {agent} in '{working_dir}' now.",
+                (
+                    f"Queued {agent} for background execution in '{working_dir}'.\n"
+                    "You can continue chatting. I will send a styled notification with results."
+                ),
             )
-            result = await _send_action(
-                "run_coding_agent",
-                {"agent": agent, "prompt": prompt, "working_dir": working_dir},
-                confirmed=True,
+            _spawn_background_task(
+                _run_gateway_action_in_background(
+                    action="run_coding_agent",
+                    params={"agent": agent, "prompt": prompt, "working_dir": working_dir},
+                    title=f"Coding Agent ({agent})",
+                    project=working_dir,
+                ),
+                tag=f"run-coding-agent-{agent}-{uuid.uuid4().hex[:8]}",
             )
-            await update.message.reply_text(_format_result(result), parse_mode="HTML")
         except Exception as exc:
             await update.message.reply_text(f"I couldn't run {agent}: {exc}")
         return True
@@ -2905,10 +2994,20 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
             params["model"] = model
         try:
             await update.message.reply_text(
-                f"Switching Cline provider to {provider}" + (f" (model: {model})" if model else "") + ".",
+                (
+                    "Queued Cline provider update in background: "
+                    f"{provider}" + (f" ({model})" if model else "") + "."
+                ),
             )
-            result = await _send_action("configure_coding_agent", params, confirmed=True)
-            await update.message.reply_text(_format_result(result), parse_mode="HTML")
+            _spawn_background_task(
+                _run_gateway_action_in_background(
+                    action="configure_coding_agent",
+                    params=params,
+                    title="Cline Provider Update",
+                    project="cline",
+                ),
+                tag=f"configure-coding-agent-{uuid.uuid4().hex[:8]}",
+            )
         except Exception as exc:
             await update.message.reply_text(f"I couldn't switch Cline provider: {exc}")
         return True
@@ -2992,38 +3091,74 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
             return True
         try:
             await update.message.reply_text(
-                f"Generating a plan for '{_project_display(project)}' now."
-            )
-            plan = await _project_manager.generate_plan(project["id"])
-            _last_project_id = project["id"]
-            summary = (plan.get("summary") or "Plan generated.").strip()
-            milestones = plan.get("milestones", []) or []
-            top = [m.get("name", "").strip() for m in milestones if m.get("name")]
-            top_text = ", ".join(top[:3]) if top else "No milestones listed."
-            if len(top) > 3:
-                top_text += f", and {len(top) - 3} more"
-            if cfg.AUTO_APPROVE_AND_START:
-                await _project_manager.approve_plan(project["id"])
-                await _project_manager.start_execution(project["id"])
-                await update.message.reply_text(
-                    (
-                        f"Plan generated and approved for '{_project_display(project)}'.\n"
-                        f"{summary}\n\n"
-                        f"Top milestones: {top_text}\n"
-                        "Execution started. I will post milestone review updates."
-                    ),
+                (
+                    f"Plan generation queued for '{_project_display(project)}'.\n"
+                    "This runs in background; I will notify you with formatted updates."
                 )
-            else:
+            )
+            _last_project_id = project["id"]
+            project_name = _project_display(project)
+
+            async def _bg_generate_plan() -> None:
+                await _notify_styled(
+                    "progress",
+                    "Plan Generation",
+                    "Started plan generation in background.",
+                    project=project_name,
+                )
+                plan = await _project_manager.generate_plan(project["id"])
+                summary = (plan.get("summary") or "Plan generated.").strip()
+                milestones = plan.get("milestones", []) or []
+                top = [m.get("name", "").strip() for m in milestones if m.get("name")]
+                top_text = ", ".join(top[:3]) if top else "No milestones listed."
+                if len(top) > 3:
+                    top_text += f", and {len(top) - 3} more"
+
+                if cfg.AUTO_APPROVE_AND_START:
+                    await _project_manager.approve_plan(project["id"])
+                    await _project_manager.start_execution(project["id"])
+                    await _notify_styled(
+                        "success",
+                        "Plan Generation",
+                        (
+                            "Plan generated, approved, and execution started.\n"
+                            f"Summary: {summary}\n"
+                            f"Top milestones: {top_text}"
+                        ),
+                        project=project_name,
+                    )
+                    return
+
+                await _notify_styled(
+                    "success",
+                    "Plan Generation",
+                    (
+                        "Plan generated and awaiting approval.\n"
+                        f"Summary: {summary}\n"
+                        f"Top milestones: {top_text}"
+                    ),
+                    project=project_name,
+                )
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("Approve", callback_data=f"approve_plan:{project['id']}"),
                     InlineKeyboardButton("Cancel", callback_data=f"cancel_plan:{project['id']}"),
                 ]])
-                await update.message.reply_text(
-                    f"Plan ready for '{_project_display(project)}'.\n"
-                    f"{summary}\n\n"
-                    f"Top milestones: {top_text}",
-                    reply_markup=keyboard,
-                )
+                if _bot_app and _bot_app.bot:
+                    await _bot_app.bot.send_message(
+                        chat_id=cfg.ALLOWED_USER_ID,
+                        text=(
+                            f"<b>Plan approval needed</b>\n"
+                            f"Project: <b>{html.escape(project_name)}</b>\n"
+                            f"Top milestones: {html.escape(top_text)}"
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+
+            _spawn_background_task(
+                _bg_generate_plan(),
+                tag=f"generate-plan-{project['id']}-{uuid.uuid4().hex[:8]}",
+            )
         except Exception as exc:
             await update.message.reply_text(f"I couldn't generate the plan: {exc}")
         return True
@@ -3046,17 +3181,44 @@ async def _handle_natural_action(update: Update, text: str) -> bool:
 
         if intent == "approve_and_start":
             try:
-                if project.get("status") in {"ideation", "planning"}:
-                    await _project_manager.approve_plan(project["id"])
-                if project.get("status") in {"planning", "approved", "ideation"}:
-                    await _project_manager.start_execution(project["id"])
-                    await update.message.reply_text(
-                        f"Started execution for '{_project_display(project)}'."
+                await update.message.reply_text(
+                    (
+                        f"Queued execution start for '{_project_display(project)}'.\n"
+                        "I will notify you when the state transition completes."
                     )
-                else:
-                    await update.message.reply_text(
-                        f"'{_project_display(project)}' is currently {project.get('status')}."
+                )
+
+                async def _bg_approve_start() -> None:
+                    project_name = _project_display(project)
+                    await _notify_styled(
+                        "progress",
+                        "Execution Start",
+                        "Starting execution workflow in background.",
+                        project=project_name,
                     )
+                    status = str(project.get("status", ""))
+                    if status in {"ideation", "planning"}:
+                        await _project_manager.approve_plan(project["id"])
+                    if status in {"planning", "approved", "ideation"}:
+                        await _project_manager.start_execution(project["id"])
+                        await _notify_styled(
+                            "success",
+                            "Execution Start",
+                            "Execution started successfully.",
+                            project=project_name,
+                        )
+                        return
+                    await _notify_styled(
+                        "warning",
+                        "Execution Start",
+                        f"Project is currently '{status}', so start was skipped.",
+                        project=project_name,
+                    )
+
+                _spawn_background_task(
+                    _bg_approve_start(),
+                    tag=f"approve-start-{project['id']}-{uuid.uuid4().hex[:8]}",
+                )
             except Exception as exc:
                 await update.message.reply_text(f"I couldn't start execution: {exc}")
             return True
@@ -3253,21 +3415,21 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
 
 async def on_project_progress(project_id: str, event_type: str, summary: str) -> None:
     """Called by the orchestrator to send progress updates to Telegram."""
-    tags = {
-        "started": "[START]",
-        "task_started": "[TASK]",
-        "task_completed": "[DONE]",
-        "milestone_started": "[MILESTONE]",
-        "milestone_review": "[REVIEW]",
-        "testing": "[TEST]",
-        "completed": "[COMPLETE]",
-        "error": "[ERROR]",
-        "paused": "[PAUSE]",
-        "resumed": "[RESUME]",
-        "cancelled": "[CANCEL]",
+    level_map = {
+        "started": "progress",
+        "task_started": "progress",
+        "task_completed": "success",
+        "milestone_started": "progress",
+        "milestone_review": "info",
+        "testing": "info",
+        "completed": "success",
+        "error": "error",
+        "paused": "warning",
+        "resumed": "progress",
+        "cancelled": "warning",
     }
-    tag = tags.get(event_type, "[INFO]")
-    await _send_to_user(f"{tag} {html.escape(summary)}")
+    title = f"Project Event: {event_type}"
+    await _notify_styled(level_map.get(event_type, "info"), title, summary, project=project_id)
 
 
 # ------------------------------------------------------------------
@@ -3469,49 +3631,71 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("No project found in ideation status. Use /newproject first.")
         return
 
+    project_name = _project_display(project)
     await update.message.reply_text(
-        f"Generating plan for <b>{html.escape(project['display_name'])}</b> ...",
+        (
+            f"Plan generation queued for <b>{html.escape(project_name)}</b>.\n"
+            "I will post styled progress updates in chat."
+        ),
         parse_mode="HTML",
     )
 
-    try:
-        plan = await _project_manager.generate_plan(project["id"])
-        # Format the plan for Telegram.
-        milestones = plan.get("milestones", [])
-        milestone_text = ""
-        for i, ms in enumerate(milestones, 1):
-            est = ms.get("estimated_minutes", "?")
-            tasks = ms.get("tasks", [])
-            task_list = "\n".join(f"    - {t.get('title', '?')}" for t in tasks)
-            milestone_text += f"\n{i}. <b>{html.escape(ms.get('name', ''))}</b> (~{est} min)\n{task_list}\n"
+    async def _bg_cmd_plan() -> None:
+        await _notify_styled(
+            "progress",
+            "Plan Generation",
+            "Started from /plan command.",
+            project=project_name,
+        )
+        try:
+            plan = await _project_manager.generate_plan(project["id"])
+            milestones = plan.get("milestones", [])
+            top = [str(ms.get("name", "")).strip() for ms in milestones if ms.get("name")]
+            top_text = ", ".join(top[:4]) if top else "No milestones listed."
 
-        if cfg.AUTO_APPROVE_AND_START:
-            await _project_manager.approve_plan(project["id"])
-            await _project_manager.start_execution(project["id"])
-            await update.message.reply_text(
-                f"<b>PROJECT PLAN: {html.escape(project['display_name'])}</b>\n"
-                f"{'=' * 30}\n"
-                f"{html.escape(plan.get('summary', ''))}\n\n"
-                f"<b>Milestones:</b>{milestone_text}\n"
-                f"\n<b>Autonomous execution started.</b> "
-                f"Milestone reviews and status updates will be posted automatically.",
-                parse_mode="HTML",
+            if cfg.AUTO_APPROVE_AND_START:
+                await _project_manager.approve_plan(project["id"])
+                await _project_manager.start_execution(project["id"])
+                await _notify_styled(
+                    "success",
+                    "Plan Generation",
+                    (
+                        "Plan generated and auto-started.\n"
+                        f"Summary: {plan.get('summary', '')}\n"
+                        f"Top milestones: {top_text}"
+                    ),
+                    project=project_name,
+                )
+                return
+
+            await _notify_styled(
+                "success",
+                "Plan Generation",
+                (
+                    "Plan generated and waiting for approval.\n"
+                    f"Summary: {plan.get('summary', '')}\n"
+                    f"Top milestones: {top_text}"
+                ),
+                project=project_name,
             )
-        else:
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("Approve", callback_data=f"approve_plan:{project['id']}"),
                 InlineKeyboardButton("Cancel", callback_data=f"cancel_plan:{project['id']}"),
             ]])
-            await update.message.reply_text(
-                f"<b>PROJECT PLAN: {html.escape(project['display_name'])}</b>\n"
-                f"{'=' * 30}\n"
-                f"{html.escape(plan.get('summary', ''))}\n\n"
-                f"<b>Milestones:</b>{milestone_text}",
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-    except Exception as exc:
-        await update.message.reply_text(f"Error generating plan: {exc}")
+            if _bot_app and _bot_app.bot:
+                await _bot_app.bot.send_message(
+                    chat_id=cfg.ALLOWED_USER_ID,
+                    text=f"<b>Plan approval needed</b> for <b>{html.escape(project_name)}</b>.",
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+        except Exception as exc:
+            await _notify_styled("error", "Plan Generation", f"Failed: {exc}", project=project_name)
+
+    _spawn_background_task(
+        _bg_cmd_plan(),
+        tag=f"cmd-plan-{project['id']}-{uuid.uuid4().hex[:8]}",
+    )
 
 
 async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4277,7 +4461,12 @@ def build_app() -> Application:
     """Create and configure the Telegram bot application."""
     global _bot_app
 
-    app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(cfg.TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
 
     # v2 project commands.
     app.add_handler(CommandHandler("start", cmd_start))
