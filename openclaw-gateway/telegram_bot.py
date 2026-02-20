@@ -1186,6 +1186,21 @@ def _is_smalltalk_or_ack(text: str) -> bool:
     )
 
 
+def _is_pure_greeting(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    return bool(
+        re.fullmatch(
+            (
+                r"("
+                r"(?:hi|hello|hey|heya|yo|sup)(?:\s+(?:there|skynet|bot))?"
+                r"|good\s+(?:morning|afternoon|evening)"
+                r")[.!? ]*"
+            ),
+            lowered,
+        ),
+    )
+
+
 def _smalltalk_reply(text: str) -> str:
     lowered = (text or "").strip().lower()
     if any(tok in lowered for tok in ("thanks", "thank you")):
@@ -1200,6 +1215,10 @@ async def _smalltalk_reply_with_context(update: Update, text: str) -> str:
     - Otherwise keep greeting brief and open-ended.
     """
     base = _smalltalk_reply(text)
+    # Pure greetings should stay lightweight and not force project/workflow prompts.
+    if _is_pure_greeting(text):
+        return base
+
     key = _doc_intake_key(update)
     if key is not None:
         if _has_pending_project_route_for_user(key):
@@ -2510,6 +2529,8 @@ def _extract_project_name_candidate(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return ""
+    if _is_smalltalk_or_ack(raw):
+        return ""
     quoted_name = _extract_quoted_project_name_candidate(raw)
     if quoted_name:
         return quoted_name
@@ -3578,6 +3599,8 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
     if key is None or key not in _pending_project_name_requests:
         return False
     if (text or "").strip().startswith("/"):
+        return False
+    if _is_smalltalk_or_ack(text):
         return False
 
     candidate = _extract_project_name_candidate(text)
