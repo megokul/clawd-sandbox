@@ -966,6 +966,30 @@ async def _write_initial_project_docs(
         return True, " ".join(notes)
     return True, ""
 
+def _is_docs_infra_error(message: str) -> bool:
+    """Return True when a doc-write failure is due to agent/SSH being unreachable.
+
+    These are infrastructure gaps, not code bugs — suppress the red ERROR
+    notification so the user isn't alarmed twice (they already saw the
+    bootstrap-deferred message).
+    """
+    text = (message or "").lower()
+    return any(marker in text for marker in (
+        "ssh action failed",
+        "unable to connect to port",
+        "no connected agent",
+        "agent not connected",
+        "agent disconnected",
+        "ssh fallback is not configured",
+        "no existing session",
+        "connection reset",
+        "could not resolve hostname",
+        "timed out",
+        "timeout",
+        "service unavailable",
+    ))
+
+
 async def _run_project_docs_generation_async(
     project: dict,
     answers: dict[str, str],
@@ -988,6 +1012,14 @@ async def _run_project_docs_generation_async(
         scaffold_only=(reason == "project_create"),
     )
     elapsed = round(time.monotonic() - start, 1)
+    if not ok and _is_docs_infra_error(note):
+        # Agent/SSH unreachable — silently defer, no red notification.
+        logger.info(
+            "Doc generation deferred (agent unavailable) for project %s: %s",
+            project.get("id", "?"),
+            note,
+        )
+        return
     if ok:
         msg = (
             f"Documentation update complete ({reason}) in {elapsed}s.\n"
