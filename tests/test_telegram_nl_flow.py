@@ -3,27 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-import importlib.util
 import sys
 
 import pytest
 
-def _load_module(path: Path, module_name: str):
-    gateway_root = str(path.parent)
+def _ensure_gateway_path() -> None:
+    repo_root = Path(__file__).parent.parent
+    gateway_root = str(repo_root / "openclaw-gateway")
     if gateway_root not in sys.path:
         sys.path.insert(0, gateway_root)
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load module from {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def test_create_project_prompt_then_name_parsing() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     intent = bot._extract_nl_intent("can we start a project")
     assert intent.get("intent") == "create_project"
@@ -33,9 +26,8 @@ def test_create_project_prompt_then_name_parsing() -> None:
 
 
 def test_do_project_phrase_maps_to_create_project() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_3")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     intent = bot._extract_nl_intent("can we do a project")
     assert intent.get("intent") == "create_project"
@@ -43,27 +35,24 @@ def test_do_project_phrase_maps_to_create_project() -> None:
 
 
 def test_pending_name_candidate_from_longer_sentence() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_4")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     text = "python app. - 'kundan bhai' which when clicked makes a 1 sec beep"
     assert bot._extract_project_name_candidate(text) == "kundan bhai"
 
 
 def test_pending_name_candidate_from_descriptive_unquoted_sentence() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_7")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     text = "python app -kundi curry which when clicked give a 1 sec beep"
     assert bot._extract_project_name_candidate(text) == "kundi curry"
 
 
 def test_start_the_project_not_misclassified_as_new_project() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_2")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     intent = bot._extract_nl_intent(
         "its a python project. start the project and build it. "
@@ -73,36 +62,32 @@ def test_start_the_project_not_misclassified_as_new_project() -> None:
 
 
 def test_followup_implementation_text_not_classified_as_create_project() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_8")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     intent = bot._extract_nl_intent("make it a python app when clicked will produce 1 sec beep")
     assert intent.get("intent") != "create_project"
 
 
 def test_build_project_typo_maps_to_approve_and_start() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_9")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     intent = bot._extract_nl_intent("build prpjetc")
     assert intent.get("intent") == "approve_and_start"
 
 
 def test_same_project_phrase_not_treated_as_project_name() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_10")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     assert bot._extract_project_name_candidate("the same project") == ""
 
 
 @pytest.mark.asyncio
 async def test_hybrid_intent_prefers_llm_result() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_5")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     async def _fake_llm(_: str) -> dict[str, str]:
         return {"intent": "list_projects"}
@@ -114,9 +99,8 @@ async def test_hybrid_intent_prefers_llm_result() -> None:
 
 @pytest.mark.asyncio
 async def test_hybrid_intent_falls_back_to_rules() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_6")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     async def _fake_llm(_: str) -> dict[str, str]:
         return {}
@@ -128,9 +112,8 @@ async def test_hybrid_intent_falls_back_to_rules() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_name_does_not_hijack_generate_plan_intent() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_nl_11")
+    _ensure_gateway_path()
+    from bot import nl_intent as bot
 
     class _DummyUser:
         id = 123
@@ -143,8 +126,10 @@ async def test_pending_name_does_not_hijack_generate_plan_intent() -> None:
         effective_user = _DummyUser()
         message = _DummyMessage()
 
+    from bot import state as bot_state
+
     user_id = int(_DummyUpdate.effective_user.id)
-    bot._pending_project_name_requests[user_id] = {"expected": "project_name"}
+    bot_state._pending_project_name_requests[user_id] = {"expected": "project_name"}
 
     async def _fake_hybrid(_text: str, update=None) -> dict[str, str]:
         return {"intent": "generate_plan"}
@@ -154,4 +139,4 @@ async def test_pending_name_does_not_hijack_generate_plan_intent() -> None:
 
     # pending-name gate should release and allow normal handler to process generate_plan.
     assert handled is False
-    assert user_id not in bot._pending_project_name_requests
+    assert user_id not in bot_state._pending_project_name_requests

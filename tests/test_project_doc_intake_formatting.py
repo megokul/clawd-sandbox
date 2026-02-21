@@ -3,26 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-import importlib.util
 import sys
 
 
-def _load_module(path: Path, module_name: str):
-    gateway_root = str(path.parent)
+def _ensure_gateway_path() -> None:
+    repo_root = Path(__file__).parent.parent
+    gateway_root = str(repo_root / "openclaw-gateway")
     if gateway_root not in sys.path:
         sys.path.insert(0, gateway_root)
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load module from {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def test_project_doc_intake_sanitizes_and_formats_natural_language() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_doc_intake")
+    _ensure_gateway_path()
+    from bot import doc_intake as bot
 
     answers = {
         "problem": "# users need quick test beep\x00\n\ncreate tiny utility",
@@ -55,9 +48,8 @@ def test_project_doc_intake_sanitizes_and_formats_natural_language() -> None:
 
 
 def test_doc_opt_out_understands_natural_language_variants() -> None:
-    repo_root = Path(__file__).parent.parent
-    bot_path = repo_root / "openclaw-gateway" / "telegram_bot.py"
-    bot = _load_module(bot_path, "oc_gateway_telegram_bot_doc_intake_optout")
+    _ensure_gateway_path()
+    from bot import doc_intake as bot
 
     assert bot._doc_intake_opt_out_requested("no docs required. just build the app")
     assert bot._doc_intake_opt_out_requested("it's simple, documentation is not needed")

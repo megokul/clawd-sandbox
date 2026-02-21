@@ -1,18 +1,12 @@
-"""
-Backward-compatibility shim.
-
-All Telegram bot logic has been moved to the bot/ package.
-This module re-exports the public API so that main.py and any
-other callers continue to work without changes.
-"""
-from bot import (
+"""SKYNET Gateway -- Telegram bot package."""
+from .commands import (
     build_app,
-    set_dependencies,
     on_project_progress,
     request_worker_approval,
     handle_callback,
     handle_text,
 )
+from .state import set_dependencies
 
 __all__ = [
     "build_app",
