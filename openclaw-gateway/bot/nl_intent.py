@@ -212,6 +212,17 @@ def _is_plausible_project_name(name: str) -> bool:
         )
     ):
         return False
+    # Reject names that are entirely a "start/create/make a new project" command phrase
+    # e.g. "start a new project", "create a project", "a new project"
+    if re.match(
+        r"^(?:start|create|make|begin|kick\s*off|spin\s*up)\s+"
+        r"(?:a\s+|an\s+|my\s+)?(?:new\w*\s+)?"
+        r"(?:project|application|repo|proj|app)$",
+        lowered,
+    ):
+        return False
+    if re.match(r"^(?:a\s+|an\s+)?(?:new\s+)?(?:project|application|repo|proj|app)$", lowered):
+        return False
     return True
 
 
@@ -1264,20 +1275,15 @@ async def _create_project_from_name(update: Update, name: str) -> bool:
         bootstrap_note = _project_bootstrap_note(project)
         if bootstrap_note:
             bootstrap_note = "\n" + bootstrap_note
-        docs_note = (
-            "\nDocumentation: finalized template scaffold started in background. "
-            "I will populate project-specific docs only after enough requirements are captured."
-        )
         await update.message.reply_text(
             (
-                f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}\n"
+                f"Created project '{_project_display(project)}' at {project.get('local_path', '')}.{repo_line}"
                 f"{bootstrap_note}\n"
-                f"{docs_note}\n"
-                "Tell me what you want it to do, and I’ll take it forward."
+                "Tell me what you want it to do, and I'll take it forward."
             )
         )
         _spawn_background_task(
-            _run_project_docs_generation_async(project, {}, reason="project_create"),
+            _run_project_docs_generation_async(project, {}, reason="project_create", notify_user=False),
             tag=f"doc-init-{project['id']}",
         )
         await _start_project_documentation_intake(update, project)
@@ -1404,7 +1410,7 @@ async def _maybe_handle_pending_project_name(update: Update, text: str) -> bool:
 
     if not candidate:
         await update.message.reply_text(
-            "I didn’t catch the name yet. Just send the project name (or say 'cancel').",
+            "I didn't catch the name yet. Just send the project name (or say 'cancel').",
         )
         return True
     return True
