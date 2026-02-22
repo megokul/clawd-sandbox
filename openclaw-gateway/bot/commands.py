@@ -132,7 +132,6 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
                 tools=tools,
                 system=system_prompt,
                 max_tokens=1500,
-                require_tools=True,
                 task_type="general",
                 allowed_providers=state._CHAT_PROVIDER_ALLOWLIST,
             )
