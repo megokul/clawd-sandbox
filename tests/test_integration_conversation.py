@@ -501,3 +501,70 @@ async def test_scenario_unknown_tool() -> None:
         assert "unknown" in result.lower()
     finally:
         await _teardown_state(db, cfg, orig_auth)
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO 12: Stale project context — "can we start a project" must not
+#              reference the previously active project ("boomboom").
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_scenario_new_project_intent_clears_stale_context() -> None:
+    """With boomboom as _last_project_id, 'can we start a project' clears context and asks for name."""
+    router = ScriptedRouter([
+        # LLM asked for the new project name (no tool calls — just a question)
+        _LLMResponse(text="Sure! What would you like to name the new project?"),
+    ])
+    db, pm, registry, cfg, orig_auth = await _build_state(router)
+    try:
+        from bot import state
+
+        # Simulate a previously worked-on project
+        p = await pm.create_project("boomboom")
+        state._last_project_id = p["id"]
+
+        replies = await _send("can we start a project")
+
+        # LLM should have been called
+        assert router._idx >= 1, "LLM should be called (not treated as greeting)"
+        assert replies, "bot should reply"
+
+        # _last_project_id must have been cleared by the intent detection BEFORE LLM call
+        # (state._last_project_id may now be set to new project if LLM called project_create,
+        #  but in this scripted scenario LLM only asks for a name — so it should be None)
+        assert state._last_project_id is None, (
+            f"_last_project_id should be None after new-project intent; got {state._last_project_id}"
+        )
+
+        # The reply should NOT reference boomboom
+        reply_text = " ".join(replies).lower()
+        assert "boomboom" not in reply_text, (
+            f"Bot reply should not reference 'boomboom'; got: {reply_text}"
+        )
+    finally:
+        await _teardown_state(db, cfg, orig_auth)
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO 13: _is_new_project_intent unit checks
+# ---------------------------------------------------------------------------
+
+def test_is_new_project_intent_matches_typical_phrases() -> None:
+    """Verify the intent detector fires on the canonical phrases."""
+    from bot.nl_intent import _is_new_project_intent
+
+    assert _is_new_project_intent("can we start a project") is True
+    assert _is_new_project_intent("start a project") is True
+    assert _is_new_project_intent("create a project") is True
+    assert _is_new_project_intent("new project") is True
+    assert _is_new_project_intent("make a new project called foo") is True
+
+
+def test_is_new_project_intent_does_not_match_non_creation_phrases() -> None:
+    """Verify the intent detector does NOT fire on unrelated project messages."""
+    from bot.nl_intent import _is_new_project_intent
+
+    assert _is_new_project_intent("what projects do I have") is False
+    assert _is_new_project_intent("add idea to the project") is False
+    assert _is_new_project_intent("list my projects") is False
+    assert _is_new_project_intent("hi") is False

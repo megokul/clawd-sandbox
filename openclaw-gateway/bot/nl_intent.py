@@ -23,6 +23,19 @@ from .helpers import (
 logger = logging.getLogger("skynet.telegram")
 
 
+_NEW_PROJECT_RE = re.compile(
+    r"\b(?:start|create|make|begin|initiate)\b.{0,35}\bproject\b"
+    r"|\bnew\s+(?:project|app|application)\b"
+    r"|\bproject\b.{0,20}\b(?:start|create|make|begin)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_new_project_intent(text: str) -> bool:
+    """Return True if the message strongly signals intent to START a brand-new project."""
+    return bool(_NEW_PROJECT_RE.search((text or "").strip()))
+
+
 def _is_pure_greeting(text: str) -> bool:
     lowered = (text or "").strip().lower()
     return bool(

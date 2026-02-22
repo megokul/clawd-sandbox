@@ -60,6 +60,7 @@ from .memory import (
     _set_memory_enabled_for_user,
 )
 from .nl_intent import (
+    _is_new_project_intent,
     _is_pure_greeting,
     _resolve_project,
     _smalltalk_reply_with_context,
@@ -1207,7 +1208,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # 4. Everything else → LLM with all tools including project management
+    # 4. New-project intent → clear stale project context before LLM call
+    #    so the context block doesn't say "Last worked on: boomboom" and the
+    #    LLM asks for a name rather than continuing the old project.
+    if _is_new_project_intent(text):
+        state._last_project_id = None
+
+    # 5. Everything else → LLM with all tools including project management
     await _reply_with_openclaw_capabilities(update, text)
 
 

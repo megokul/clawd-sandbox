@@ -116,7 +116,7 @@ def _store_pending_project_removal(project: dict[str, Any]) -> str:
 
 
 async def _build_project_context_block() -> str:
-    """Build a short context string about the active project for the LLM system prompt."""
+    """Build a short context string about the last worked-on project for the LLM system prompt."""
     if not state._project_manager or not state._last_project_id:
         return ""
     try:
@@ -129,10 +129,12 @@ async def _build_project_context_block() -> str:
         ideas = project.get("ideas") or []
         idea_count = len(ideas) if isinstance(ideas, list) else "?"
         return (
-            f"\n\n## Active project: {name}\n"
+            f"\n\n## Last worked on: {name}\n"
             f"Status: {status} | Ideas captured: {idea_count}\n"
-            "When the user describes features or requirements, call project_add_idea. "
-            "When the user has enough context and wants to proceed, call project_generate_plan."
+            "IMPORTANT: Do NOT assume the user wants to continue this project. "
+            "If they say 'start a project', 'new project', 'create a project', or anything suggesting "
+            "they want to build something new — ask for the new project name and call project_create. "
+            "Only reference this project if the user clearly continues its conversation."
         )
     except Exception:
         return ""

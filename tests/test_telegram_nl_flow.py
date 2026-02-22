@@ -54,6 +54,39 @@ def test_pure_greeting_case_insensitive() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _is_new_project_intent
+# ---------------------------------------------------------------------------
+
+def test_new_project_intent_positive_cases() -> None:
+    _ensure_gateway_path()
+    from bot.nl_intent import _is_new_project_intent
+
+    assert _is_new_project_intent("can we start a project") is True
+    assert _is_new_project_intent("start a project") is True
+    assert _is_new_project_intent("create a project") is True
+    assert _is_new_project_intent("new project") is True
+    assert _is_new_project_intent("make a new project") is True
+    assert _is_new_project_intent("i want to create a project") is True
+    assert _is_new_project_intent("let's begin a new project") is True
+    assert _is_new_project_intent("can you help me start a project called myapp") is True
+    assert _is_new_project_intent("new app please") is True
+
+
+def test_new_project_intent_negative_cases() -> None:
+    _ensure_gateway_path()
+    from bot.nl_intent import _is_new_project_intent
+
+    # These should NOT match — no new-project creation signal
+    assert _is_new_project_intent("what projects do I have") is False
+    assert _is_new_project_intent("list my projects") is False
+    assert _is_new_project_intent("add idea to the project") is False
+    assert _is_new_project_intent("what's the status of my project") is False
+    assert _is_new_project_intent("hi") is False
+    assert _is_new_project_intent("how's the boomboom project going") is False
+    assert _is_new_project_intent("") is False
+
+
+# ---------------------------------------------------------------------------
 # _resolve_project — no project manager
 # ---------------------------------------------------------------------------
 
