@@ -65,34 +65,9 @@ _confirm_counter: int = 0
 # { "key": asyncio.Future }
 _pending_approvals: _TTLDict = _TTLDict(ttl_seconds=600)
 _approval_counter: int = 0
-# Stores pending natural-language follow-up for project-name capture by user id.
-_pending_project_name_requests: _TTLDict = _TTLDict(ttl_seconds=1800)
-# Stores pending routing choices when user says "start/make project" without clear target.
-_pending_project_route_requests: _TTLDict = _TTLDict(ttl_seconds=1800)
 # Stores pending destructive remove-project confirmations.
 _pending_project_removals: _TTLDict = _TTLDict(ttl_seconds=300)
-# Stores pending project documentation intake by user id.
-_pending_project_doc_intake: _TTLDict = _TTLDict(ttl_seconds=3600)
 _background_tasks: set[asyncio.Task] = set()
-
-_PROJECT_DOC_INTAKE_STEPS: list[tuple[str, str]] = [
-    ("problem", "What problem are we solving with this project?"),
-    ("users", "Who are the primary users?"),
-    ("requirements", "List the top requirements or features (comma-separated or bullets)."),
-    ("non_goals", "What is explicitly out of scope?"),
-    ("success_metrics", "How will we measure success?"),
-    ("tech_stack", "Any preferred tech stack or constraints (language/framework/runtime)?"),
-]
-_DOC_INTAKE_FIELDS: tuple[str, ...] = tuple(field for field, _ in _PROJECT_DOC_INTAKE_STEPS)
-
-_DOC_INTAKE_FIELD_LIMITS: dict[str, int] = {
-    "problem": 1500,
-    "users": 800,
-    "requirements": 2000,
-    "non_goals": 1200,
-    "success_metrics": 1200,
-    "tech_stack": 1200,
-}
 
 _DOC_LLM_TARGET_PATHS: tuple[str, ...] = (
     "docs/product/PRD.md",
@@ -125,19 +100,30 @@ _bot_app = None  # Application | None -- assigned in build_app()
 # Short rolling chat history for natural Telegram conversation.
 _chat_history: list[dict] = []
 _CHAT_HISTORY_MAX: int = 12
-_CHAT_SYSTEM_PROMPT = (
-    "You are OpenClaw running through Telegram. "
-    "Converse naturally in plain language and extract key details from user text. "
-    "Never be dismissive or sarcastic. "
-    "For greetings (for example 'hi'), reply briefly and naturally without canned scripts. "
-    "Use available tools/skills whenever execution, inspection, git, build, docker, or web research is needed. "
-    "When asked to use coding agents, use check_coding_agents and run_coding_agent tools (codex/claude/cline CLIs). "
-    "Ask concise clarifying questions only when required details are missing. "
-    "Never ask the user to switch to slash commands; infer intent from natural language and run the matching action. "
-    "Do not return numbered option menus unless the user explicitly asks for options. "
-    "If a tool fails, explain it in one short sentence and continue with the best possible answer. "
-    "Do not output JSON unless the user explicitly asks for JSON."
-)
+_CHAT_SYSTEM_PROMPT = """\
+You are OpenClaw, an AI engineering collaborator running in Telegram.
+
+## Conversation style
+- Talk like a capable engineer working with the user, not a form or menu.
+- Never be dismissive or sarcastic. For greetings reply briefly and naturally.
+- Never show numbered option menus. Never tell the user to use slash commands.
+- Ask one focused follow-up question when something important is unclear.
+- If a tool fails, say so in one sentence and continue.
+- Do not output JSON unless explicitly asked.
+
+## Project work
+- When the user describes what they want to build, immediately call project_add_idea.
+- When creating a project, call project_create with the name.
+- Gather requirements naturally through conversation — no rigid question forms.
+- Once you have the problem, requirements, and tech stack, offer to write docs or generate the plan.
+- When the user says they are ready, call project_generate_plan.
+- Use project_generate_docs when asked to write the PRD or when enough context is captured.
+
+## Other tools
+- Use filesystem, git, build, docker, search, and IDE tools whenever execution is needed.
+- When asked to use coding agents (codex/claude/cline), use check_coding_agents and run_coding_agent.
+- Prefer delegated execution through tools for long-running work.\
+"""
 _last_project_id: str | None = None
 _last_model_signature: str | None = None
 _CHAT_PROVIDER_ALLOWLIST = (

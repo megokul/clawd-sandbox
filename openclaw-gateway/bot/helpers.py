@@ -115,86 +115,27 @@ def _store_pending_project_removal(project: dict[str, Any]) -> str:
     return key
 
 
-def _store_pending_project_route_request(user_id: int, source_text: str = "") -> str:
-    key = f"pr{uuid.uuid4().hex[:10]}"
-    state._pending_project_route_requests[key] = {
-        "user_id": int(user_id),
-        "source_text": str(source_text or "").strip(),
-        "created_at": time.time(),
-    }
-    return key
-
-
-def _project_choice_label(project: dict[str, Any]) -> str:
-    name = _project_display(project).strip()
-    status = str(project.get("status") or "unknown").strip().lower()
-    if len(name) > 38:
-        name = name[:35].rstrip() + "..."
-    return f"{name} [{status}]"
-
-
-def _has_pending_project_route_for_user(user_id: int) -> bool:
-    for pending in state._pending_project_route_requests.values():
-        if int(pending.get("user_id", 0) or 0) == int(user_id):
-            return True
-    return False
-
-
-def _clear_pending_project_route_for_user(user_id: int) -> None:
-    to_delete = [
-        key
-        for key, pending in state._pending_project_route_requests.items()
-        if int(pending.get("user_id", 0) or 0) == int(user_id)
-    ]
-    for key in to_delete:
-        state._pending_project_route_requests.pop(key, None)
-
-
-async def _ask_project_routing_choice(update: Update, text: str = "") -> bool:
-    if state._project_manager is None:
-        await update.message.reply_text("Project manager not initialized.")
-        return True
-
-    key = _pending_project_name_key(update)
-    if key is not None:
-        state._pending_project_name_requests.pop(key, None)
-
+async def _build_project_context_block() -> str:
+    """Build a short context string about the active project for the LLM system prompt."""
+    if not state._project_manager or not state._last_project_id:
+        return ""
     try:
-        projects = await state._project_manager.list_projects()
-    except Exception as exc:
-        await update.message.reply_text(f"I couldn't load project list: {exc}")
-        return True
-
-    if not projects:
-        if key is not None:
-            state._pending_project_name_requests[key] = {"expected": "project_name"}
-        await update.message.reply_text(
-            "No existing projects found. Tell me the new project name to create.",
+        from db import store
+        project = await store.get_project(state._project_manager.db, state._last_project_id)
+        if not project:
+            return ""
+        name = _project_display(project)
+        status = str(project.get("status") or "unknown")
+        ideas = project.get("ideas") or []
+        idea_count = len(ideas) if isinstance(ideas, list) else "?"
+        return (
+            f"\n\n## Active project: {name}\n"
+            f"Status: {status} | Ideas captured: {idea_count}\n"
+            "When the user describes features or requirements, call project_add_idea. "
+            "When the user has enough context and wants to proceed, call project_generate_plan."
         )
-        return True
-
-    user = update.effective_user
-    if user is None:
-        await update.message.reply_text("Sure. What should we call the new project?")
-        return True
-
-    _clear_pending_project_route_for_user(int(user.id))
-    route_key = _store_pending_project_route_request(int(user.id), text)
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("New Project", callback_data=f"project_route_new:{route_key}"),
-            InlineKeyboardButton("Add to Existing", callback_data=f"project_route_existing:{route_key}"),
-        ],
-        [InlineKeyboardButton("Cancel", callback_data=f"project_route_cancel:{route_key}")],
-    ])
-    await update.message.reply_text(
-        (
-            "Do you want to start a <b>new project</b> or add this to an <b>existing project</b>?"
-        ),
-        parse_mode="HTML",
-        reply_markup=keyboard,
-    )
-    return True
+    except Exception:
+        return ""
 
 
 def _truncate_for_notice(value: str, *, max_chars: int = 700) -> str:
@@ -280,6 +221,32 @@ async def _ask_remove_project_confirmation(update: Update, project: dict[str, An
         parse_mode="HTML",
         reply_markup=keyboard,
     )
+
+
+async def _send_remove_project_confirmation(project: dict[str, Any]) -> None:
+    """Send a remove-project confirmation via proactive message (no update object needed)."""
+    key = _store_pending_project_removal(project)
+    display = html.escape(_project_display(project))
+    from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
+    keyboard = IKM([[
+        IKB("Yes", callback_data=f"confirm_remove_project:{key}"),
+        IKB("No", callback_data=f"cancel_remove_project:{key}"),
+    ]])
+    text = (
+        f"Remove project <b>{display}</b> permanently from SKYNET records?\n"
+        "This deletes its tasks/ideas/plans/history from the DB. "
+        "Workspace files are not deleted."
+    )
+    if state._bot_app and state._bot_app.bot:
+        try:
+            await state._bot_app.bot.send_message(
+                chat_id=cfg.ALLOWED_USER_ID,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send remove confirmation: %s", exc)
 
 
 async def _send_to_user(text: str, parse_mode: str = "HTML") -> None:
@@ -522,48 +489,5 @@ def _action_result_ok(result: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
-def _is_explicit_new_project_request(text: str) -> bool:
-    raw = (text or "").strip()
-    lowered = raw.lower()
-    descriptor = r"(?:[a-z0-9+._-]+\s+){0,3}?"
-    if re.search(
-        r"\b(?:new\w*|another)\s+(?:project|application|repo|proj|app)\b",
-        lowered,
-    ):
-        return True
-    if re.search(
-        r"\b(?:create|begin|kick\s*off|spin\s*up)\s+"
-        r"(?:a\s+|an\s+|my\s+)?(?:new\w*\s+)?"
-        + descriptor
-        + r"(?:project|application|repo|proj|app)\b",
-        raw,
-        flags=re.IGNORECASE,
-    ):
-        return True
-    if re.search(
-        r"\b(?:start|make)\s+"
-        r"(?:a\s+|an\s+|my\s+)(?:new\w*\s+)?"
-        + descriptor
-        + r"(?:project|application|repo|proj|app)\b",
-        raw,
-        flags=re.IGNORECASE,
-    ):
-        return True
-    if re.search(
-        r"\b(?:can\s+we|let'?s|i\s+want\s+to)\s+"
-        r"(?:do|create|start|begin|make)\s+"
-        r"(?:a\s+|an\s+|my\s+)?(?:new\w*\s+)?"
-        + descriptor
-        + r"(?:project|application|repo|proj|app)\b",
-        raw,
-        flags=re.IGNORECASE,
-    ):
-        return True
-    return False
 
-def _pending_project_name_key(update: Update) -> int | None:
-    user = update.effective_user
-    if user is None:
-        return None
-    return int(user.id)
 

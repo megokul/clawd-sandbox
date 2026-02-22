@@ -246,6 +246,7 @@ def build_default_registry(
     from .ide import IDESkill
     from .docker import DockerSkill
     from .skynet_delegate import SkynetDelegateSkill
+    from .project_skill import ProjectManagementSkill
     from .external_prompt_loader import load_external_prompt_skills
 
     registry = SkillRegistry()
@@ -256,6 +257,7 @@ def build_default_registry(
     registry.register(IDESkill())
     registry.register(DockerSkill())
     registry.register(SkynetDelegateSkill())
+    registry.register(ProjectManagementSkill())
 
     if external_skills_dir is None:
         external_skills_dir = os.environ.get(

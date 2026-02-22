@@ -28,21 +28,18 @@ from .helpers import (
     _ask_remove_project_confirmation,
     _authorised,
     _build_assistant_content,
-    _clear_pending_project_route_for_user,
+    _build_project_context_block,
     _extract_json_object,
     _extract_textual_tool_call,
     _format_result,
     _friendly_ai_error,
     _gateway_get,
     _gateway_post,
-    _is_explicit_new_project_request,
     _is_smalltalk_or_ack,
     _join_project_path,
     _maybe_notify_model_switch,
     _notify_styled,
     _parse_path,
-    _pending_project_name_key,
-    _project_choice_label,
     _project_display,
     _send_action,
     _send_to_user,
@@ -62,12 +59,8 @@ from .memory import (
     _profile_prompt_context,
     _set_memory_enabled_for_user,
 )
-from .doc_intake import _maybe_handle_project_doc_intake
 from .nl_intent import (
-    _capture_idea,
-    _handle_natural_action,
-    _maybe_capture_implicit_idea,
-    _maybe_handle_pending_project_name,
+    _is_pure_greeting,
     _resolve_project,
     _smalltalk_reply_with_context,
 )
@@ -100,10 +93,12 @@ async def _reply_with_openclaw_capabilities(update: Update, text: str) -> None:
         except Exception:
             logger.exception("Failed to resolve project context for chat")
 
+    project_context = await _build_project_context_block()
     base_system_prompt = (
         f"{state._CHAT_SYSTEM_PROMPT}\n\n"
         f"Working directory: {project_path}\n"
         "If you perform filesystem/git/build actions, prefer this context unless the user specifies another path."
+        f"{project_context}"
     )
     if state._main_persona_agent.should_delegate(text):
         base_system_prompt += (
@@ -422,88 +417,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("<b>Plan CANCELLED</b>", parse_mode="HTML")
         except Exception as exc:
             await query.edit_message_text(f"Error: {exc}")
-
-    elif data.startswith("project_route_new:"):
-        route_key = data[len("project_route_new:"):]
-        pending = state._pending_project_route_requests.pop(route_key, None)
-        if not pending:
-            await query.edit_message_text("Selection expired. Send your request again.")
-            return
-        user_id = int(pending.get("user_id", 0) or 0)
-        if user_id:
-            state._pending_project_name_requests[user_id] = {"expected": "project_name"}
-            state._pending_project_doc_intake.pop(user_id, None)
-        await query.edit_message_text(
-            "Perfect. What should we name the new project?",
-        )
-
-    elif data.startswith("project_route_existing:"):
-        route_key = data[len("project_route_existing:"):]
-        pending = state._pending_project_route_requests.get(route_key)
-        if not pending:
-            await query.edit_message_text("Selection expired. Send your request again.")
-            return
-        try:
-            projects = await state._project_manager.list_projects()
-        except Exception as exc:
-            await query.edit_message_text(f"I couldn't load projects: {exc}")
-            return
-        if not projects:
-            state._pending_project_route_requests.pop(route_key, None)
-            await query.edit_message_text("No existing projects found. Send a new project name to create.")
-            return
-
-        buttons = [
-            [InlineKeyboardButton(_project_choice_label(project), callback_data=f"project_pick:{route_key}:{project['id']}")]
-            for project in projects[:12]
-        ]
-        buttons.append([InlineKeyboardButton("Cancel", callback_data=f"project_route_cancel:{route_key}")])
-        await query.edit_message_text(
-            "Choose the existing project:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-
-    elif data.startswith("project_pick:"):
-        payload = data[len("project_pick:"):]
-        parts = payload.split(":", 1)
-        if len(parts) != 2:
-            await query.edit_message_text("Invalid selection.")
-            return
-        route_key, project_id = parts
-        pending = state._pending_project_route_requests.pop(route_key, None)
-        if not pending:
-            await query.edit_message_text("Selection expired. Send your request again.")
-            return
-        user_id = int(pending.get("user_id", 0) or 0)
-        if user_id:
-            state._pending_project_name_requests.pop(user_id, None)
-            state._pending_project_doc_intake.pop(user_id, None)
-
-        try:
-            from db import store
-
-            project = await store.get_project(state._project_manager.db, project_id)
-        except Exception as exc:
-            await query.edit_message_text(f"I couldn't load the selected project: {exc}")
-            return
-
-        if not project:
-            await query.edit_message_text("That project no longer exists. Please try again.")
-            return
-
-        state._last_project_id = project["id"]
-        await query.edit_message_text(
-            (
-                f"Using existing project <b>{html.escape(_project_display(project))}</b>.\n"
-                "Tell me what you want to add or change, and I’ll continue there."
-            ),
-            parse_mode="HTML",
-        )
-
-    elif data.startswith("project_route_cancel:"):
-        route_key = data[len("project_route_cancel:"):]
-        state._pending_project_route_requests.pop(route_key, None)
-        await query.edit_message_text("Project selection cancelled.")
 
     elif data.startswith("confirm_remove_project:"):
         key = data[len("confirm_remove_project:"):]
@@ -1272,20 +1185,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not text:
         return
 
+    # 1. Memory commands (/remember, /forget, etc.)
     if await _maybe_handle_memory_text_command(update, text):
         return
 
+    # 2. Profile capture (background, non-blocking)
     skip_store = _is_no_store_once_message(text)
-    await _capture_profile_memory(update, text, skip_store=skip_store)
+    _spawn_background_task(
+        _capture_profile_memory(update, text, skip_store=skip_store),
+        tag="profile-capture",
+    )
 
-    if await _maybe_handle_pending_project_name(update, text):
-        return
-
-    if await _maybe_handle_project_doc_intake(update, text):
-        return
-
-    # Keep greetings/acks deterministic and out of tool execution flows.
-    if _is_smalltalk_or_ack(text):
+    # 3. Pure greetings — brief reply, skip tool overhead
+    if _is_pure_greeting(text):
         reply = await _smalltalk_reply_with_context(update, text)
         await update.message.reply_text(reply)
         await _append_user_conversation(
@@ -1296,27 +1208,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Optional explicit idea prefix while in chat mode.
-    if text.lower().startswith("idea:"):
-        idea_text = text[5:].strip()
-        if not idea_text:
-            await update.message.reply_text("Usage: idea: <text>")
-            return
-        await _capture_idea(update, idea_text)
-        return
-
-    if await _handle_natural_action(update, text):
-        return
-
-    # Deterministic fallback: do not let explicit "new project" requests fall
-    # into generic chat or implicit-idea capture if intent extraction misses.
-    if _is_explicit_new_project_request(text):
-        await _ask_project_routing_choice(update, text)
-        return
-
-    if await _maybe_capture_implicit_idea(update, text):
-        return
-
+    # 4. Everything else → LLM with all tools including project management
     await _reply_with_openclaw_capabilities(update, text)
 
 

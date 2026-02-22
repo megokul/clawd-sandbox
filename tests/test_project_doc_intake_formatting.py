@@ -47,10 +47,22 @@ def test_project_doc_intake_sanitizes_and_formats_natural_language() -> None:
     assert "- [ ] Play 1 sec beep" in features
 
 
-def test_doc_opt_out_understands_natural_language_variants() -> None:
+def test_has_minimum_doc_context_requires_problem_and_requirements() -> None:
     _ensure_gateway_path()
     from bot import doc_intake as bot
 
-    assert bot._doc_intake_opt_out_requested("no docs required. just build the app")
-    assert bot._doc_intake_opt_out_requested("it's simple, documentation is not needed")
-    assert bot._doc_intake_opt_out_requested("without documentation, just make it now")
+    # Missing problem → not enough
+    assert not bot._has_minimum_doc_context({"requirements": "play a beep", "users": "devs"})
+    # Missing requirements → not enough
+    assert not bot._has_minimum_doc_context({"problem": "need a beep", "users": "devs"})
+    # problem + requirements + at least one more field → enough
+    assert bot._has_minimum_doc_context({
+        "problem": "need a beep app",
+        "requirements": "click to beep",
+        "tech_stack": "python",
+    })
+    assert bot._has_minimum_doc_context({
+        "problem": "need a beep app",
+        "requirements": "click to beep",
+        "users": "developers",
+    })
