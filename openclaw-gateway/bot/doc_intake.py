@@ -1124,7 +1124,7 @@ async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
         intake_state["answers"] = answers_snapshot
         state._pending_project_doc_intake.pop(key, None)
         _spawn_background_task(
-            _capture_minimal_intake_idea_snapshot(state, note=text),
+            _capture_minimal_intake_idea_snapshot(intake_state, note=text),
             tag=f"doc-intake-skip-snapshot-{intake_state.get('project_id', 'unknown')}",
         )
         await update.message.reply_text(
@@ -1135,6 +1135,8 @@ async def _maybe_handle_project_doc_intake(update: Update, text: str) -> bool:
             )
         )
         # Continue processing this same message as project detail input.
+        # Lazy import to avoid circular dependency (nl_intent imports from doc_intake).
+        from .nl_intent import _maybe_capture_implicit_idea
         await _maybe_capture_implicit_idea(update, text)
         return True
 
