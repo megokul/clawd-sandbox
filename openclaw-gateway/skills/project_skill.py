@@ -298,6 +298,46 @@ class ProjectManagementSkill(BaseSkill):
         except Exception:
             return None
 
+    async def _find_project_by_name(self, pm, name: str) -> dict | None:
+        """Look up an existing project by name/slug (case-insensitive)."""
+        try:
+            projects = await pm.list_projects()
+            name_lower = name.strip().lower()
+            for p in projects:
+                if (p.get("name") or "").lower() == name_lower:
+                    return p
+                if (p.get("display_name") or "").lower() == name_lower:
+                    return p
+                # slug comparison (replace spaces/hyphens)
+                slug = name_lower.replace(" ", "-").replace("_", "-")
+                p_slug = (p.get("name") or "").lower().replace(" ", "-").replace("_", "-")
+                if slug == p_slug:
+                    return p
+        except Exception:
+            pass
+        return None
+
+    async def _resolve_project(self, pm, st, tool_input: dict) -> tuple[dict | None, str]:
+        """Resolve project from tool_input or active context. Returns (project, error_msg)."""
+        project_id = self._resolve_project_id(st, tool_input)
+        if project_id:
+            project = await self._get_project(pm, project_id)
+            if project:
+                st._last_project_id = project["id"]
+                return project, ""
+        # Fall back to listing and picking most recent active project
+        try:
+            projects = await pm.list_projects()
+        except Exception:
+            projects = []
+        if not projects:
+            return None, "No projects found. Create one first with project_create."
+        active_statuses = ("ideation", "planning", "approved", "coding", "testing", "paused")
+        active = [p for p in projects if p.get("status") in active_statuses]
+        chosen = active[0] if active else projects[0]
+        st._last_project_id = chosen["id"]
+        return chosen, ""
+
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
@@ -305,8 +345,22 @@ class ProjectManagementSkill(BaseSkill):
     async def _create(self, pm, st, inp: dict) -> str:
         name = (inp.get("name") or "").strip()
         if not name:
-            return "ERROR: Project name is required."
-        project = await pm.create_project(name)
+            return "ERROR: Project name is required. Please provide a name."
+        # If project already exists, activate it instead of failing.
+        try:
+            project = await pm.create_project(name)
+        except ValueError as exc:
+            if "already exists" in str(exc).lower():
+                existing = await self._find_project_by_name(pm, name)
+                if existing:
+                    st._last_project_id = existing["id"]
+                    from bot.helpers import _project_display
+                    status = existing.get("status", "?")
+                    return (
+                        f"Project '{_project_display(existing)}' already exists (status: {status}). "
+                        "It is now the active project."
+                    )
+            return f"ERROR: {exc}"
         st._last_project_id = project["id"]
         from bot.helpers import _project_bootstrap_note, _project_display
         path = project.get("local_path", "")
@@ -320,14 +374,12 @@ class ProjectManagementSkill(BaseSkill):
         idea = (inp.get("idea") or "").strip()
         if not idea:
             return "ERROR: idea text is required."
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "ERROR: No active project. Create one first."
-        count = await pm.add_idea(project_id, idea)
-        st._last_project_id = project_id
-        project = await self._get_project(pm, project_id)
-        name = project.get("name", project_id) if project else project_id
-        return f"Added idea #{count} to '{name}'."
+        project, err = await self._resolve_project(pm, st, inp)
+        if not project:
+            return f"ERROR: {err}"
+        count = await pm.add_idea(project["id"], idea)
+        st._last_project_id = project["id"]
+        return f"Added idea #{count} to '{project.get('name', project['id'])}'."
 
     async def _list(self, pm) -> str:
         projects = await pm.list_projects()
@@ -343,14 +395,10 @@ class ProjectManagementSkill(BaseSkill):
         return "\n".join(lines)
 
     async def _status(self, pm, st, inp: dict) -> str:
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "No active project."
-        project = await self._get_project(pm, project_id)
+        project, err = await self._resolve_project(pm, st, inp)
         if not project:
-            return f"Project '{project_id}' not found."
-        st._last_project_id = project_id
-        name = project.get("name", project_id)
+            return err or "No active project."
+        name = project.get("name", project["id"])
         status = project.get("status", "?")
         path = project.get("local_path", "?")
         ideas = project.get("ideas") or []
@@ -372,43 +420,43 @@ class ProjectManagementSkill(BaseSkill):
         return "\n".join(lines)
 
     async def _generate_plan(self, pm, st, inp: dict) -> str:
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "ERROR: No active project."
-        await pm.generate_plan(project_id)
-        st._last_project_id = project_id
-        return f"Plan generation started for project '{project_id}'. I will notify you when it's ready for review."
+        project, err = await self._resolve_project(pm, st, inp)
+        if not project:
+            return f"ERROR: {err}"
+        await pm.generate_plan(project["id"])
+        st._last_project_id = project["id"]
+        return f"Plan generation started for '{project.get('name', project['id'])}'. I will notify you when it's ready for review."
 
     async def _approve_start(self, pm, st, inp: dict) -> str:
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "ERROR: No active project."
-        await pm.approve_plan(project_id)
-        await pm.start_execution(project_id)
-        st._last_project_id = project_id
-        return f"Plan approved and execution started for project '{project_id}'."
+        project, err = await self._resolve_project(pm, st, inp)
+        if not project:
+            return f"ERROR: {err}"
+        await pm.approve_plan(project["id"])
+        await pm.start_execution(project["id"])
+        st._last_project_id = project["id"]
+        return f"Plan approved and execution started for '{project.get('name', project['id'])}'."
 
     async def _pause(self, pm, st, inp: dict) -> str:
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "ERROR: No active project."
-        await pm.pause_project(project_id)
-        return f"Project '{project_id}' paused."
+        project, err = await self._resolve_project(pm, st, inp)
+        if not project:
+            return f"ERROR: {err}"
+        await pm.pause_project(project["id"])
+        return f"Project '{project.get('name', project['id'])}' paused."
 
     async def _resume(self, pm, st, inp: dict) -> str:
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "ERROR: No active project."
-        await pm.resume_project(project_id)
-        st._last_project_id = project_id
-        return f"Project '{project_id}' resumed."
+        project, err = await self._resolve_project(pm, st, inp)
+        if not project:
+            return f"ERROR: {err}"
+        await pm.resume_project(project["id"])
+        st._last_project_id = project["id"]
+        return f"Project '{project.get('name', project['id'])}' resumed."
 
     async def _cancel(self, pm, st, inp: dict) -> str:
-        project_id = self._resolve_project_id(st, inp)
-        if not project_id:
-            return "ERROR: No active project."
-        await pm.cancel_project(project_id)
-        return f"Project '{project_id}' cancelled."
+        project, err = await self._resolve_project(pm, st, inp)
+        if not project:
+            return f"ERROR: {err}"
+        await pm.cancel_project(project["id"])
+        return f"Project '{project.get('name', project['id'])}' cancelled."
 
     async def _remove(self, pm, st, inp: dict) -> str:
         project_id = self._resolve_project_id(st, inp)
